@@ -254,6 +254,33 @@
     font-size: 12px;
   }
 
+  /* ----------- source-mode editor ----------- */
+  .src-pane {
+    background: var(--panel);
+    border: 1px solid var(--line);
+    border-radius: 8px;
+    overflow: hidden;
+  }
+  #srcEditor {
+    display: block;
+    width: 100%;
+    min-height: calc(100vh - 130px);
+    border: 0;
+    outline: 0;
+    resize: vertical;
+    padding: 14px 16px;
+    margin: 0;
+    background: var(--bg);
+    color: var(--text);
+    font-family: var(--mono);
+    font-size: 12px;
+    line-height: 1.55;
+    white-space: pre;
+    overflow: auto;
+    tab-size: 2;
+  }
+  #srcEditor:focus { background: var(--panel); }
+
   /* ----------- parse error panel ----------- */
   .parse-error {
     background: var(--panel);
@@ -544,6 +571,10 @@
   <button class="btn" id="newBtn" title="Create a new YAML">new</button>
   <button class="btn" id="saveBtn" title="Save (Ctrl+S)">save</button>
   <button class="btn" id="darkBtn" title="Toggle dark mode" aria-label="dark mode">&#9789;</button>
+  <div class="toggle" id="viewModeToggle">
+    <button data-viewmode="pipeline" class="active">Pipeline</button>
+    <button data-viewmode="source">Source</button>
+  </div>
   <div class="toggle" id="orientToggle">
     <button data-rankdir="TB" class="active">Portrait</button>
     <button data-rankdir="LR">Landscape</button>
@@ -768,9 +799,10 @@ const state = {
   rawDoc: null,          // full parsed YAML doc; pipeline.steps share identity
   rankdir: 'TB',         // 'TB' = portrait, 'LR' = landscape (dagre rankdir)
   portMode: 'labels',    // 'labels' = port name on the arrow; 'ports' = partition inside source card
+  viewMode: 'pipeline',  // 'pipeline' = visual layout; 'source' = raw YAML textarea
   selectedPath: null,    // comma-joined indices of the inspected step
   currentPath: null,     // server-relative path of the loaded file
-  currentText: '',       // raw YAML text last loaded/saved
+  currentText: '',       // raw YAML text last loaded/saved (kept in sync in source mode)
   dirty: false,          // edits since last save
   hasComments: false,
 };
@@ -783,6 +815,11 @@ function render() {
   pkgName.textContent = state.pipeline.name;
   const tag = state.currentPath ? '@ ' + state.currentPath : '';
   pathCrumb.innerHTML = tag + (state.dirty ? ' <span class="dirty"></span>' : '');
+  syncHeaderForMode();
+  if (state.viewMode === 'source') {
+    renderSource();
+    return;
+  }
   stage.innerHTML = flowTemplate.render(state.pipeline);
   if (state.selectedPath != null) {
     stage.querySelectorAll(`[data-path="${state.selectedPath}"]`)
@@ -790,6 +827,30 @@ function render() {
   }
   // dagre runs after the DOM is in place so card sizes can be measured.
   requestAnimationFrame(applyFlowLayout);
+}
+
+/* Source mode replaces the visual layout with a full-height textarea
+ * bound to state.currentText. Edits are propagated live so a switch
+ * back to pipeline mode (or a save) sees the latest text. */
+function renderSource() {
+  stage.innerHTML = `<div class="src-pane">
+    <textarea id="srcEditor" spellcheck="false" wrap="off"></textarea>
+  </div>`;
+  const ta = document.getElementById('srcEditor');
+  ta.value = state.currentText || '';
+  ta.addEventListener('input', () => {
+    state.currentText = ta.value;
+    state.dirty = true;
+    pathCrumb.innerHTML = (state.currentPath ? '@ ' + state.currentPath : '')
+      + ' <span class="dirty"></span>';
+  });
+}
+
+/* Hide the pipeline-only header controls when source mode is active. */
+function syncHeaderForMode() {
+  const isPipeline = state.viewMode === 'pipeline';
+  document.getElementById('orientToggle').style.display = isPipeline ? '' : 'none';
+  document.getElementById('portModeToggle').style.display = isPipeline ? '' : 'none';
 }
 
 const SVG_NS = 'http://www.w3.org/2000/svg';
@@ -1029,6 +1090,10 @@ function loadYamlText(text, sourceName, serverPath) {
   try {
     doc = jsyaml.load(text);
   } catch (e) {
+    // Keep the failing source on hand so the user can open Source mode
+    // and fix it without re-loading the file.
+    state.currentText = text;
+    state.currentPath = serverPath || null;
     showParseError(serverPath || sourceName || '(input)', text, e);
     return;
   }
@@ -1057,10 +1122,10 @@ function loadYamlText(text, sourceName, serverPath) {
 function showParseError(label, text, e) {
   state.pipeline = { name: '(parse error)', steps: [] };
   state.rawDoc = null;
-  state.currentText = '';
-  state.currentPath = null;
   state.dirty = false;
   state.selectedPath = null;
+  // Keep state.currentText and state.currentPath so the user can flip
+  // to Source mode and fix the broken YAML in place.
   closeInspector();
 
   pkgName.textContent = '(parse error)';
@@ -1411,7 +1476,9 @@ async function writeServerFile(path, text) {
 }
 
 function openSaveAs(prefill) {
-  if (state.dirty) state.currentText = serializeRawDoc();
+  if (state.viewMode !== 'source' && state.dirty) {
+    state.currentText = serializeRawDoc();
+  }
   const initial = prefill || state.currentPath || 'untitled.yml';
   const body = `
     <div class="saveform">
@@ -1459,8 +1526,10 @@ function serializeRawDoc() {
 }
 
 async function saveCurrent() {
-  if (!state.rawDoc) { toast('Nothing loaded', true); return; }
-  if (state.dirty) state.currentText = serializeRawDoc();
+  if (!state.rawDoc && !state.currentText) { toast('Nothing loaded', true); return; }
+  if (state.viewMode !== 'source' && state.dirty) {
+    state.currentText = serializeRawDoc();
+  }
   if (!state.currentPath) { openSaveAs(); return; }
   try {
     await writeServerFile(state.currentPath, state.currentText);
@@ -1497,6 +1566,41 @@ document.getElementById('orientToggle').addEventListener('click', (e) => {
     el.classList.toggle('portrait', state.rankdir !== 'LR');
   });
   applyFlowLayout();
+});
+
+/* view-mode toggle — visual pipeline vs raw YAML source */
+document.getElementById('viewModeToggle').addEventListener('click', (e) => {
+  const b = e.target.closest('button[data-viewmode]');
+  if (!b) return;
+  const newMode = b.dataset.viewmode;
+  if (newMode === state.viewMode) return;
+
+  if (newMode === 'source') {
+    // Refresh source text from the in-memory doc so inspector edits
+    // become visible. If state.dirty was set from a prior source edit,
+    // currentText is already authoritative — don't clobber.
+    if (state.rawDoc && !(state.viewMode === 'source' && state.dirty)) {
+      state.currentText = serializeRawDoc();
+    }
+    closeInspector();
+  } else {
+    // Returning to the visual view: re-parse the (possibly edited)
+    // source. Refuse to switch on parse error so the user can fix it
+    // without losing context.
+    let doc;
+    try {
+      doc = jsyaml.load(state.currentText || '');
+    } catch (err) {
+      toast('Parse error: ' + err.message + ' — fix the source first', true);
+      return;
+    }
+    state.rawDoc = (doc && typeof doc === 'object') ? doc : {};
+    state.pipeline = buildPipelineView(state.rawDoc);
+  }
+  state.viewMode = newMode;
+  document.querySelectorAll('#viewModeToggle button').forEach((x) =>
+    x.classList.toggle('active', x === b));
+  render();
 });
 
 /* port-mode toggle — partition source card or label the arrow */
