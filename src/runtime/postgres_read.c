@@ -1060,8 +1060,14 @@ static int pgr_stream_get_next(struct ArrowArrayStream *st,
     }
 
     /* Build Arrow leaves. utf8 builder copies bytes, so PGresult can
-     * be freed afterwards. */
-    struct ArrowArray **kids = calloc((size_t)s->n_cols, sizeof *kids);
+     * be freed afterwards.
+     *
+     * gcc -Walloc-size-larger-than warns here because it has lost
+     * track of n_cols being positive (the PQnfields check up at the
+     * top guarantees it). Local int re-binds the range for the cast. */
+    int nc = s->n_cols;
+    if (nc <= 0) goto cleanup;
+    struct ArrowArray **kids = calloc((size_t)nc, sizeof *kids);
     if (!kids) { betl_set_error(s->ctx, "postgres.read: out of memory");
                  goto cleanup; }
     int build_failed = 0;

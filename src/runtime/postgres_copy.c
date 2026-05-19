@@ -526,6 +526,13 @@ static int pc_sink_run(void *state) {
         cols[i].child_idx = child;
     }
 
+    /* Declared up here so gcc can prove it's initialised on every path
+     * that reaches the final `wrote %" PRId64 " rows` log line. Early
+     * `goto end_copy;` from the header-write failure jumps past the
+     * loop's own n_rows = 0, even though that path always has rc != OK
+     * and therefore never reads n_rows. */
+    int64_t n_rows = 0;
+
     /* --- BEGIN, optional TRUNCATE, COPY ... FROM STDIN BINARY. --- */
     rc = pg_exec_simple(p, "BEGIN", "BEGIN");
     if (rc != BETL_OK) goto out;
@@ -598,7 +605,6 @@ static int pc_sink_run(void *state) {
     }
 
     PcBuf tuple = {0};
-    int64_t n_rows = 0;
     for (;;) {
         if (betl_should_cancel(p->ctx)) {
             pcset_err(p, "postgres.copy: cancelled by host");
