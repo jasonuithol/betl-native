@@ -319,7 +319,8 @@
     font-family: var(--mono);
     font-size: 11px;
   }
-  .field .expand-sql {
+  .field .expand-sql,
+  .field .edit-conn {
     border: 1px solid var(--line-strong);
     background: var(--panel);
     color: var(--text);
@@ -330,8 +331,129 @@
     font-size: 10px;
     margin-left: auto;
   }
-  .field .expand-sql:hover { background: var(--hover); }
+  .field .expand-sql:hover,
+  .field .edit-conn:hover { background: var(--hover); }
   .field label { display: flex; align-items: center; gap: 6px; }
+
+  /* ----------- connection-string pair editor ----------- */
+  .cs-modal {
+    position: fixed; inset: 0;
+    background: var(--overlay);
+    display: none;
+    align-items: flex-start; justify-content: center;
+    padding-top: 8vh;
+    z-index: 350;
+  }
+  .cs-modal.show { display: flex; }
+  .cs-modal-card {
+    background: var(--panel);
+    color: var(--text);
+    border: 1px solid var(--line);
+    border-radius: 10px;
+    width: min(720px, 92vw);
+    max-height: 84vh;
+    display: flex; flex-direction: column;
+    box-shadow: 0 12px 40px rgba(0,0,0,0.3);
+  }
+  .cs-modal-head {
+    padding: 10px 14px;
+    border-bottom: 1px solid var(--line);
+    display: flex; align-items: center; gap: 10px;
+  }
+  .cs-modal-head h3 {
+    margin: 0; font-size: 13px; font-weight: 600; font-family: var(--mono);
+  }
+  .cs-modal-head .crumb {
+    color: var(--muted); font-family: var(--mono); font-size: 11px;
+  }
+  .cs-modal-head .close {
+    margin-left: auto;
+    border: 0; background: transparent; cursor: pointer;
+    color: var(--muted); font-size: 20px; line-height: 1;
+    padding: 2px 6px; border-radius: 4px;
+  }
+  .cs-modal-head .close:hover { background: var(--hover); color: var(--text); }
+  .cs-modal-body { padding: 12px 14px; overflow-y: auto; flex: 1; }
+  .cs-modal-foot {
+    padding: 10px 14px;
+    border-top: 1px solid var(--line);
+    display: flex; gap: 8px; justify-content: flex-end;
+    align-items: center;
+  }
+  .cs-modal-foot .hint {
+    margin-right: auto;
+    color: var(--muted);
+    font-family: var(--mono);
+    font-size: 11px;
+  }
+  .cs-pair-row {
+    display: grid;
+    grid-template-columns: minmax(110px, 1fr) auto minmax(180px, 2.4fr) auto;
+    gap: 6px;
+    align-items: center;
+    margin-bottom: 6px;
+  }
+  .cs-pair-row input {
+    font-family: var(--mono);
+    font-size: 12px;
+    padding: 5px 8px;
+    border: 1px solid var(--line-strong);
+    background: var(--bg);
+    color: var(--text);
+    border-radius: 4px;
+    outline: none;
+    width: 100%;
+  }
+  .cs-pair-row input:focus { border-color: var(--accent); }
+  .cs-pair-row .cs-eq {
+    color: var(--muted); font-family: var(--mono); font-size: 12px;
+    text-align: center;
+  }
+  .cs-pair-row .cs-remove {
+    width: 26px; height: 26px;
+    border: 1px solid var(--line-strong);
+    background: var(--panel);
+    cursor: pointer;
+    border-radius: 4px;
+    color: var(--muted);
+    font-size: 14px; line-height: 1;
+    padding: 0;
+  }
+  .cs-pair-row .cs-remove:hover {
+    background: var(--hover); color: var(--script); border-color: var(--script);
+  }
+  .cs-add {
+    margin-top: 4px;
+    border: 1px dashed var(--line-strong);
+    background: transparent;
+    cursor: pointer;
+    padding: 5px 10px;
+    border-radius: 4px;
+    font-family: var(--mono); font-size: 12px;
+    color: var(--muted);
+  }
+  .cs-add:hover { background: var(--hover); color: var(--text); }
+  .cs-preview-label {
+    margin: 14px 0 4px;
+    font-family: var(--mono);
+    font-size: 10px;
+    text-transform: uppercase;
+    letter-spacing: 0.05em;
+    color: var(--muted);
+  }
+  .cs-preview {
+    padding: 10px 12px;
+    background: var(--bg);
+    border: 1px solid var(--line);
+    border-radius: 6px;
+    font-family: var(--mono);
+    font-size: 11px;
+    color: var(--text);
+    word-break: break-all;
+    max-height: 110px;
+    overflow: auto;
+    white-space: pre-wrap;
+  }
 
   /* ----------- metadata strip (connections + parameters) ----------- */
   .meta-panel {
@@ -1562,6 +1684,59 @@ function pathCrumbHtml(path) {
 const SQL_KEYS = new Set(['sql', 'query']);
 function isSqlKey(k) { return SQL_KEYS.has(String(k).toLowerCase()); }
 
+/* Keys whose value looks like an ODBC / libpq connection string and
+ * benefits from a tabular key=value editor. */
+const CONNSTR_KEYS = new Set(['dsn', 'connection_string', 'conn_str']);
+function isConnStringKey(k) { return CONNSTR_KEYS.has(String(k).toLowerCase()); }
+
+/* ODBC-style connection string: `key=value;key=value;…`. Values
+ * containing `;` `=` `{` `}` are wrapped in `{...}`. Whitespace around
+ * separators is tolerated on parse but normalised on format. */
+function parseConnString(s) {
+  const pairs = [];
+  let i = 0;
+  while (i < s.length) {
+    while (i < s.length && (s[i] === ';' || s[i] === ' ' || s[i] === '\t' || s[i] === '\n')) i++;
+    if (i >= s.length) break;
+    const keyStart = i;
+    while (i < s.length && s[i] !== '=' && s[i] !== ';') i++;
+    if (i >= s.length || s[i] !== '=') {
+      const k = s.slice(keyStart, i).trim();
+      if (k) pairs.push({ key: k, value: '' });
+      continue;
+    }
+    const key = s.slice(keyStart, i).trim();
+    i++;  // skip '='
+    let value;
+    if (s[i] === '{') {
+      i++;
+      const valStart = i;
+      while (i < s.length && s[i] !== '}') i++;
+      value = s.slice(valStart, i);
+      if (i < s.length) i++;  // skip '}'
+      // Any trailing junk before next ';' gets eaten silently.
+      while (i < s.length && s[i] !== ';') i++;
+    } else {
+      const valStart = i;
+      while (i < s.length && s[i] !== ';') i++;
+      value = s.slice(valStart, i).trim();
+    }
+    pairs.push({ key, value });
+  }
+  return pairs;
+}
+
+function formatConnString(pairs) {
+  return pairs
+    .filter((p) => p.key && p.key.trim().length > 0)
+    .map(({ key, value }) => {
+      const v = value == null ? '' : String(value);
+      const needsBraces = /[;{}=]/.test(v) || /^\s|\s$/.test(v);
+      return `${key.trim()}=${needsBraces ? '{' + v + '}' : v}`;
+    })
+    .join(';');
+}
+
 function fieldEditor(key, val, opts) {
   opts = opts || {};
   const label = esc(key);
@@ -1577,6 +1752,8 @@ function fieldEditor(key, val, opts) {
     const tag = val == null ? 'unset' : typeof val;
     const expand = isSqlKey(key)
       ? `<button type="button" class="expand-sql" data-sql-for="${id}">Expand&hellip;</button>`
+      : isConnStringKey(key)
+      ? `<button type="button" class="edit-conn" data-conn-for="${id}">Edit pairs&hellip;</button>`
       : '';
     if (str.includes('\n') || str.length > 60 || isSqlKey(key)) {
       const rows = Math.min(12, Math.max(3, str.split('\n').length + 1));
@@ -1586,7 +1763,7 @@ function fieldEditor(key, val, opts) {
       </div>`;
     }
     return `<div class="field">
-      <label for="${id}">${label} <span class="kindtag">${tag}</span></label>
+      <label for="${id}">${label} <span class="kindtag">${tag}</span>${expand}</label>
       <input id="${id}" data-key="${esc(key)}" data-kind="text" value="${esc(str)}" spellcheck="false">
     </div>`;
   }
@@ -1655,6 +1832,16 @@ function renderInspector() {
       openSqlEditor(ta, ta.dataset.key || 'sql');
     });
   });
+
+  /* "Edit pairs…" on connection-string fields → tabular editor. */
+  inspectorBody.querySelectorAll('.edit-conn').forEach((btn) => {
+    btn.addEventListener('click', (e) => {
+      e.preventDefault();
+      const inp = document.getElementById(btn.dataset.connFor);
+      if (!inp) return;
+      openConnStringEditor(inp, inp.dataset.key || 'dsn');
+    });
+  });
 }
 
 /* Pop a full-screen CodeMirror SQL editor backed by the given textarea.
@@ -1717,6 +1904,109 @@ function openSqlEditor(textarea, keyLabel) {
   overlay.querySelector('.close').addEventListener('click', close);
   overlay.querySelector('.cancel').addEventListener('click', close);
   overlay.querySelector('.apply').addEventListener('click', apply);
+  overlay.addEventListener('click', (e) => { if (e.target === overlay) close(); });
+  document.addEventListener('keydown', onKey, true);
+}
+
+/* Tabular `key=value` editor for ODBC-style connection strings,
+ * modelled on the Windows PATH dialog. Each row is a flex pair; the
+ * preview at the bottom shows the rebuilt string so the user can see
+ * exactly what's getting written back to the field. */
+function openConnStringEditor(input, keyLabel) {
+  let pairs = parseConnString(input.value || '');
+  if (!pairs.length) pairs = [{ key: '', value: '' }];
+
+  const overlay = document.createElement('div');
+  overlay.className = 'cs-modal show';
+  overlay.innerHTML = `
+    <div class="cs-modal-card">
+      <div class="cs-modal-head">
+        <h3>Connection string editor</h3>
+        <span class="crumb">${esc(keyLabel)}</span>
+        <button class="close" aria-label="close">&times;</button>
+      </div>
+      <div class="cs-modal-body">
+        <div class="cs-pairs"></div>
+        <button class="cs-add" type="button">+ Add pair</button>
+        <div class="cs-preview-label">Preview</div>
+        <div class="cs-preview"></div>
+      </div>
+      <div class="cs-modal-foot">
+        <span class="hint">Esc cancels &middot; Ctrl/Cmd&#8209;Enter applies</span>
+        <button class="btn cancel">Cancel</button>
+        <button class="btn primary apply">Apply</button>
+      </div>
+    </div>`;
+  document.body.appendChild(overlay);
+
+  const pairsHost = overlay.querySelector('.cs-pairs');
+  const preview = overlay.querySelector('.cs-preview');
+
+  function renderRows() {
+    pairsHost.innerHTML = pairs.map((p, i) => `
+      <div class="cs-pair-row">
+        <input class="cs-key" data-row="${i}" placeholder="key"
+               value="${esc(p.key)}" spellcheck="false">
+        <span class="cs-eq">=</span>
+        <input class="cs-val" data-row="${i}" placeholder="value"
+               value="${esc(p.value)}" spellcheck="false">
+        <button class="cs-remove" data-row="${i}" type="button" aria-label="remove">&times;</button>
+      </div>`).join('');
+    pairsHost.querySelectorAll('.cs-key').forEach((el) => {
+      el.addEventListener('input', () => {
+        pairs[+el.dataset.row].key = el.value;
+        updatePreview();
+      });
+    });
+    pairsHost.querySelectorAll('.cs-val').forEach((el) => {
+      el.addEventListener('input', () => {
+        pairs[+el.dataset.row].value = el.value;
+        updatePreview();
+      });
+    });
+    pairsHost.querySelectorAll('.cs-remove').forEach((el) => {
+      el.addEventListener('click', () => {
+        pairs.splice(+el.dataset.row, 1);
+        if (!pairs.length) pairs.push({ key: '', value: '' });
+        renderRows();
+        updatePreview();
+      });
+    });
+  }
+  function updatePreview() {
+    preview.textContent = formatConnString(pairs);
+  }
+  renderRows();
+  updatePreview();
+  // Focus the first empty key field, or the first key.
+  const firstEmpty = pairsHost.querySelector('.cs-key[value=""]') || pairsHost.querySelector('.cs-key');
+  if (firstEmpty) firstEmpty.focus();
+
+  const close = () => {
+    document.removeEventListener('keydown', onKey, true);
+    overlay.remove();
+  };
+  const apply = () => {
+    input.value = formatConnString(pairs);
+    input.dispatchEvent(new Event('input', { bubbles: true }));
+    close();
+  };
+  function onKey(e) {
+    if (e.key === 'Escape') { e.preventDefault(); close(); }
+    else if ((e.ctrlKey || e.metaKey) && e.key === 'Enter') { e.preventDefault(); apply(); }
+  }
+
+  overlay.querySelector('.close').addEventListener('click', close);
+  overlay.querySelector('.cancel').addEventListener('click', close);
+  overlay.querySelector('.apply').addEventListener('click', apply);
+  overlay.querySelector('.cs-add').addEventListener('click', () => {
+    pairs.push({ key: '', value: '' });
+    renderRows();
+    updatePreview();
+    // Focus the new key cell.
+    const rows = pairsHost.querySelectorAll('.cs-key');
+    if (rows.length) rows[rows.length - 1].focus();
+  });
   overlay.addEventListener('click', (e) => { if (e.target === overlay) close(); });
   document.addEventListener('keydown', onKey, true);
 }
