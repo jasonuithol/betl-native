@@ -5,6 +5,14 @@
 <title>betl pipeline viewer</title>
 <script src="https://cdn.jsdelivr.net/npm/js-yaml@4.1.0/dist/js-yaml.min.js"></script>
 <script src="https://cdn.jsdelivr.net/npm/@dagrejs/dagre@1.1.4/dist/dagre.min.js"></script>
+<!-- CodeMirror 5 powers the "Expand…" SQL editor on inspector fields.
+     Loaded async so the UI still boots if jsdelivr is unreachable; the
+     expand button falls back to a toast in that case. -->
+<link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/codemirror@5.65.16/lib/codemirror.min.css">
+<link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/codemirror@5.65.16/theme/idea.min.css">
+<link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/codemirror@5.65.16/theme/material-darker.min.css">
+<script src="https://cdn.jsdelivr.net/npm/codemirror@5.65.16/lib/codemirror.min.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/codemirror@5.65.16/mode/sql/sql.min.js"></script>
 <style>
   :root {
     --bg:          #fafafa;
@@ -253,6 +261,77 @@
     font-style: italic;
     font-size: 12px;
   }
+
+  /* ----------- SQL editor (CodeMirror) overlay ----------- */
+  .sql-modal {
+    position: fixed; inset: 0;
+    background: var(--overlay);
+    display: none;
+    align-items: stretch; justify-content: center;
+    padding: 4vh 4vw;
+    z-index: 400;
+  }
+  .sql-modal.show { display: flex; }
+  .sql-modal-card {
+    background: var(--panel);
+    border: 1px solid var(--line);
+    border-radius: 10px;
+    flex: 1;
+    display: flex; flex-direction: column;
+    overflow: hidden;
+    box-shadow: 0 12px 40px rgba(0,0,0,0.35);
+  }
+  .sql-modal-head {
+    padding: 10px 14px;
+    border-bottom: 1px solid var(--line);
+    display: flex; align-items: center; gap: 10px;
+  }
+  .sql-modal-head h3 {
+    margin: 0; font-size: 13px; font-weight: 600;
+    font-family: var(--mono);
+  }
+  .sql-modal-head .crumb {
+    color: var(--muted); font-family: var(--mono); font-size: 11px;
+  }
+  .sql-modal-head .close {
+    margin-left: auto;
+    border: 0; background: transparent; cursor: pointer;
+    color: var(--muted); font-size: 20px; line-height: 1;
+    padding: 2px 6px; border-radius: 4px;
+  }
+  .sql-modal-head .close:hover { background: var(--hover); color: var(--text); }
+  .sql-modal-body { flex: 1; min-height: 0; overflow: hidden; }
+  .sql-modal-body .CodeMirror {
+    height: 100%;
+    font-family: var(--mono);
+    font-size: 12px;
+    line-height: 1.5;
+  }
+  .sql-modal-foot {
+    padding: 10px 14px;
+    border-top: 1px solid var(--line);
+    display: flex; gap: 8px; justify-content: flex-end;
+    align-items: center;
+  }
+  .sql-modal-foot .hint {
+    margin-right: auto;
+    color: var(--muted);
+    font-family: var(--mono);
+    font-size: 11px;
+  }
+  .field .expand-sql {
+    border: 1px solid var(--line-strong);
+    background: var(--panel);
+    color: var(--text);
+    border-radius: 4px;
+    padding: 1px 8px;
+    cursor: pointer;
+    font-family: var(--mono);
+    font-size: 10px;
+    margin-left: auto;
+  }
+  .field .expand-sql:hover { background: var(--hover); }
+  .field label { display: flex; align-items: center; gap: 6px; }
 
   /* ----------- metadata strip (connections + parameters) ----------- */
   .meta-panel {
@@ -1478,6 +1557,11 @@ function pathCrumbHtml(path) {
   return head + '<span class="tail">' + tail + '</span>';
 }
 
+/* Keys whose textareas should grow an "Expand…" affordance that pops
+ * a CodeMirror SQL editor. Matched case-insensitively. */
+const SQL_KEYS = new Set(['sql', 'query']);
+function isSqlKey(k) { return SQL_KEYS.has(String(k).toLowerCase()); }
+
 function fieldEditor(key, val, opts) {
   opts = opts || {};
   const label = esc(key);
@@ -1491,10 +1575,13 @@ function fieldEditor(key, val, opts) {
   if (val == null || typeof val === 'string' || typeof val === 'number' || typeof val === 'boolean') {
     const str = String(val == null ? '' : val);
     const tag = val == null ? 'unset' : typeof val;
-    if (str.includes('\n') || str.length > 60) {
+    const expand = isSqlKey(key)
+      ? `<button type="button" class="expand-sql" data-sql-for="${id}">Expand&hellip;</button>`
+      : '';
+    if (str.includes('\n') || str.length > 60 || isSqlKey(key)) {
       const rows = Math.min(12, Math.max(3, str.split('\n').length + 1));
       return `<div class="field">
-        <label for="${id}">${label} <span class="kindtag">${tag}</span></label>
+        <label for="${id}">${label} <span class="kindtag">${tag}</span>${expand}</label>
         <textarea id="${id}" data-key="${esc(key)}" data-kind="text" rows="${rows}" spellcheck="false">${esc(str)}</textarea>
       </div>`;
     }
@@ -1558,6 +1645,80 @@ function renderInspector() {
       openInspector(state.selectedPath + ',' + rel);
     });
   });
+
+  /* "Expand…" on SQL-bearing fields → CodeMirror overlay. */
+  inspectorBody.querySelectorAll('.expand-sql').forEach((btn) => {
+    btn.addEventListener('click', (e) => {
+      e.preventDefault();
+      const ta = document.getElementById(btn.dataset.sqlFor);
+      if (!ta) return;
+      openSqlEditor(ta, ta.dataset.key || 'sql');
+    });
+  });
+}
+
+/* Pop a full-screen CodeMirror SQL editor backed by the given textarea.
+ * Cancel discards; Apply writes back and fires the textarea's input
+ * event so the inspector's dirty-tracking picks it up. Esc cancels,
+ * Ctrl/Cmd+Enter applies. */
+function openSqlEditor(textarea, keyLabel) {
+  if (typeof CodeMirror === 'undefined') {
+    toast('SQL editor unavailable (CodeMirror failed to load)', true);
+    return;
+  }
+  const overlay = document.createElement('div');
+  overlay.className = 'sql-modal show';
+  overlay.innerHTML = `
+    <div class="sql-modal-card">
+      <div class="sql-modal-head">
+        <h3>SQL editor</h3>
+        <span class="crumb">${esc(keyLabel)}</span>
+        <button class="close" aria-label="close">&times;</button>
+      </div>
+      <div class="sql-modal-body"></div>
+      <div class="sql-modal-foot">
+        <span class="hint">Esc cancels &middot; Ctrl/Cmd&#8209;Enter applies</span>
+        <button class="btn cancel">Cancel</button>
+        <button class="btn primary apply">Apply</button>
+      </div>
+    </div>`;
+  document.body.appendChild(overlay);
+
+  const isDark = document.body.classList.contains('dark');
+  const cm = CodeMirror(overlay.querySelector('.sql-modal-body'), {
+    value: textarea.value,
+    mode: 'text/x-sql',
+    lineNumbers: true,
+    lineWrapping: true,
+    indentUnit: 2,
+    theme: isDark ? 'material-darker' : 'idea',
+    autofocus: true,
+  });
+  // CodeMirror sizes itself from the container at construction; flex
+  // children settle on a later layout tick so force a refresh.
+  setTimeout(() => cm.refresh(), 0);
+
+  const close = () => {
+    document.removeEventListener('keydown', onKey, true);
+    overlay.remove();
+  };
+  const apply = () => {
+    textarea.value = cm.getValue();
+    textarea.dispatchEvent(new Event('input', { bubbles: true }));
+    close();
+  };
+  function onKey(e) {
+    if (e.key === 'Escape') { e.preventDefault(); close(); }
+    else if ((e.ctrlKey || e.metaKey) && e.key === 'Enter') {
+      e.preventDefault(); apply();
+    }
+  }
+
+  overlay.querySelector('.close').addEventListener('click', close);
+  overlay.querySelector('.cancel').addEventListener('click', close);
+  overlay.querySelector('.apply').addEventListener('click', apply);
+  overlay.addEventListener('click', (e) => { if (e.target === overlay) close(); });
+  document.addEventListener('keydown', onKey, true);
 }
 
 function applyInspector() {
