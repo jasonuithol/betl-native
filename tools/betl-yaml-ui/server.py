@@ -95,6 +95,15 @@ async def put_file(path: str, request: Request):
     }
 
 
+@app.post("/api/log")
+async def log_event(request: Request):
+    """Best-effort sink for client-side errors so they show up in the
+    same terminal that's hosting the server."""
+    body = (await request.body()).decode("utf-8", errors="replace")
+    print(f"[ui] {body}", file=sys.stderr, flush=True)
+    return {"ok": True}
+
+
 # static viewer (registered last so /api/* routes win)
 app.mount("/", StaticFiles(directory=HERE, html=True), name="ui")
 

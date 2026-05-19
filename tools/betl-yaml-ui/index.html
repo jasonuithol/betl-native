@@ -254,6 +254,54 @@
     font-size: 12px;
   }
 
+  /* ----------- parse error panel ----------- */
+  .parse-error {
+    background: var(--panel);
+    border: 1px solid var(--script);
+    border-left: 4px solid var(--script);
+    border-radius: 8px;
+    padding: 14px 18px;
+    font-family: var(--mono);
+    font-size: 12px;
+    color: var(--text);
+    max-width: 900px;
+  }
+  .parse-error .pe-head {
+    font-weight: 600;
+    color: var(--script);
+    margin-bottom: 4px;
+  }
+  .parse-error .pe-head code {
+    color: var(--text);
+    font-weight: 500;
+    background: var(--head-bg);
+    padding: 1px 6px;
+    border-radius: 4px;
+  }
+  .parse-error .pe-where {
+    color: var(--muted);
+    margin-bottom: 8px;
+  }
+  .parse-error .pe-reason {
+    margin-bottom: 10px;
+    white-space: pre-wrap;
+  }
+  .parse-error pre.pe-snippet {
+    background: var(--bg);
+    border: 1px solid var(--line);
+    border-radius: 6px;
+    padding: 10px 12px;
+    margin: 0;
+    overflow: auto;
+    font-size: 11px;
+    line-height: 1.5;
+    white-space: pre;
+  }
+  .parse-error .pe-foot {
+    display: flex; justify-content: flex-end;
+    margin-top: 12px;
+  }
+
   /* ----------- path crumb in header ----------- */
   .pathcrumb {
     font-family: var(--mono);
@@ -981,7 +1029,7 @@ function loadYamlText(text, sourceName, serverPath) {
   try {
     doc = jsyaml.load(text);
   } catch (e) {
-    toast('YAML parse error: ' + e.message, true);
+    showParseError(serverPath || sourceName || '(input)', text, e);
     return;
   }
   state.rawDoc = (doc && typeof doc === 'object') ? doc : {};
@@ -1000,6 +1048,79 @@ function loadYamlText(text, sourceName, serverPath) {
   if (state.hasComments) {
     toast('Note: comments in this file will be lost on save', true);
   }
+}
+
+/* Inline parse-error panel for whole-file load failures. The previous
+ * toast-only approach was easy to miss; this leaves the error on the
+ * main stage with line/column and a code snippet around the bad spot
+ * until the next successful load. */
+function showParseError(label, text, e) {
+  state.pipeline = { name: '(parse error)', steps: [] };
+  state.rawDoc = null;
+  state.currentText = '';
+  state.currentPath = null;
+  state.dirty = false;
+  state.selectedPath = null;
+  closeInspector();
+
+  pkgName.textContent = '(parse error)';
+  pathCrumb.innerHTML = '@ ' + esc(label);
+
+  const mark = e && e.mark ? e.mark : null;
+  const line = mark && typeof mark.line === 'number' ? mark.line + 1 : null;
+  const col  = mark && typeof mark.column === 'number' ? mark.column + 1 : null;
+  const where = line != null
+    ? `at line ${line}` + (col != null ? `, column ${col}` : '')
+    : '';
+  const reason = (e && (e.reason || e.message)) || String(e);
+
+  // Browser console first, then best-effort POST to the server so the
+  // error also lands in the terminal hosting the viewer.
+  console.error('[betl-yaml-ui] YAML parse error in', label, where || '', e);
+  try {
+    fetch('/api/log', {
+      method: 'POST',
+      headers: { 'Content-Type': 'text/plain;charset=utf-8' },
+      body: `YAML parse error in ${label}` + (where ? ' ' + where : '') + `: ${reason}`,
+      keepalive: true,
+    }).catch(() => {});
+  } catch (_) {}
+
+  let snippet = '';
+  if (mark && typeof mark.snippet === 'function') {
+    snippet = mark.snippet(2, 120);  // 2-space prefix, 120-char width
+  } else if (line != null) {
+    const lines = text.split('\n');
+    const lo = Math.max(0, line - 5);
+    const hi = Math.min(lines.length, line + 4);
+    const pad = String(hi).length;
+    snippet = lines.slice(lo, hi).map((s, i) => {
+      const n = lo + i + 1;
+      const marker = n === line ? '>' : ' ';
+      return `${marker} ${String(n).padStart(pad)} | ${s}`;
+    }).join('\n');
+  }
+
+  stage.innerHTML = `<div class="parse-error">
+    <div class="pe-head">YAML parse error in <code>${esc(label)}</code></div>
+    ${where ? `<div class="pe-where">${esc(where)}</div>` : ''}
+    <div class="pe-reason">${esc(reason)}</div>
+    ${snippet ? `<pre class="pe-snippet">${esc(snippet)}</pre>` : ''}
+    <div class="pe-foot">
+      <button class="btn" id="parseErrorDismiss">Dismiss</button>
+    </div>
+  </div>`;
+  document.getElementById('parseErrorDismiss').addEventListener('click', dismissParseError);
+}
+
+function dismissParseError() {
+  pkgName.textContent = '—';
+  pathCrumb.innerHTML = '';
+  stage.innerHTML = `
+    <div style="text-align:center; color:var(--muted); padding:60px 20px; font-family:var(--mono); font-size:13px;">
+      no pipeline loaded
+      <div style="margin-top:8px; font-size:12px;">use <b>browse&hellip;</b> to pick a YAML file</div>
+    </div>`;
 }
 
 /* ---------- toast ---------- */
