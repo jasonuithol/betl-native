@@ -25,6 +25,7 @@ compile_commands.json
 # build/tools/.../out/, which the build/ rule above already covers.
 bin/
 obj/
+publish-*/
 
 # Local config / secrets
 .env
