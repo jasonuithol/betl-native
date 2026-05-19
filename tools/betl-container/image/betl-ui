@@ -1,6 +1,16 @@
 #!/bin/sh
 # In-image launcher for the betl yaml-ui. Picked up at PATH=/opt/betl/bin.
+#
+# When BETL_DEV is set (by the host wrapper bind-mounting the UI source
+# over /opt/betl/share/yaml-ui), we hand --reload to uvicorn so any
+# server.py / index.html edit on the host takes effect without a
+# container restart.
+reload_flag=""
+if [ -n "$BETL_DEV" ]; then
+    reload_flag="--reload"
+fi
 exec /opt/betl/venv/bin/python /opt/betl/share/yaml-ui/server.py \
+    $reload_flag \
     --host 0.0.0.0 \
     --root "${BETL_ROOT:-/workspace}" \
     --betl /opt/betl/bin/betl \

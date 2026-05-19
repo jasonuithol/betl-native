@@ -39,6 +39,13 @@ betl are interpreted relative to wherever you ran the wrapper from.
 - `BETL_IMAGE` — tag to run (default: `betl:dev`).
 - `BETL_RUNTIME` — `podman` or `docker` (default: auto-detect).
 - `BETL_UI_PORT` — host port for `betl ui` (default: `8765`).
+- `BETL_DEV=1` — bind-mount `tools/betl-yaml-ui/` over the image's
+  copy and pass `--reload` to uvicorn inside the container. Use this
+  while iterating on UI code so changes to `server.py` / `index.html`
+  on the host take effect without rebuilding the image:
+  ```
+  BETL_DEV=1 tools/betl-container/run-container.sh
+  ```
 
 ### Without the wrapper
 
