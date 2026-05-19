@@ -62,8 +62,8 @@ RUN mkdir -p /opt/betl/share/yaml-ui \
     && cp tools/betl-yaml-ui/server.py tools/betl-yaml-ui/index.html \
           /opt/betl/share/yaml-ui/
 
-# Wrapper scripts on PATH. The dispatch entrypoint in the runtime
-# stage routes `betl-dtsx2yaml` / `betl-ui` through these.
+# Wrapper script on PATH for the .NET binary. printf works in both
+# Buildah and BuildKit (no heredoc dependency).
 RUN printf '#!/bin/sh\nexec /opt/betl/libexec/dtsx2yaml/Betl.Dtsx2Yaml "$@"\n' \
         > /opt/betl/bin/betl-dtsx2yaml \
     && chmod +x /opt/betl/bin/betl-dtsx2yaml
@@ -99,38 +99,12 @@ COPY --from=build /opt/betl /opt/betl
 RUN python3 -m venv /opt/betl/venv \
     && /opt/betl/venv/bin/pip install --quiet --no-cache-dir fastapi uvicorn
 
-# betl-ui wrapper: launches the UI server preconfigured to find the
-# bundled betl + dtsx2yaml binaries.
-RUN cat > /opt/betl/bin/betl-ui <<'EOF' && chmod +x /opt/betl/bin/betl-ui
-#!/bin/sh
-exec /opt/betl/venv/bin/python /opt/betl/share/yaml-ui/server.py \
-    --host 0.0.0.0 \
-    --root "${BETL_ROOT:-/workspace}" \
-    --betl /opt/betl/bin/betl \
-    --dtsx2yaml /opt/betl/libexec/dtsx2yaml/Betl.Dtsx2Yaml \
-    "$@"
-EOF
-
-# Dispatch entrypoint: first arg picks the tool.
-#   betl <args>       → C engine (validate / run / --version / ...)
-#   ui                → yaml-ui (HTTP server on 0.0.0.0:8765)
-#   convert <dtsx>    → dtsx2yaml
-#   <anything-else>   → exec verbatim (escape hatch for shells / debugging)
-RUN cat > /opt/betl/bin/entrypoint.sh <<'EOF' && chmod +x /opt/betl/bin/entrypoint.sh
-#!/bin/sh
-set -e
-if [ $# -eq 0 ]; then
-    exec /opt/betl/bin/betl --help
-fi
-case "$1" in
-    ui)       shift; exec /opt/betl/bin/betl-ui "$@" ;;
-    convert)  shift; exec /opt/betl/bin/betl-dtsx2yaml "$@" ;;
-    dtsx2yaml) shift; exec /opt/betl/bin/betl-dtsx2yaml "$@" ;;
-    validate|run|--version|-V|--help|-h)
-              exec /opt/betl/bin/betl "$@" ;;
-    *)        exec "$@" ;;
-esac
-EOF
+# The launcher + dispatcher scripts live as real files in the repo so
+# Buildah (which doesn't support BuildKit's Dockerfile heredocs) can
+# build the image without parsing tricks.
+COPY tools/betl-container/image/betl-ui       /opt/betl/bin/betl-ui
+COPY tools/betl-container/image/entrypoint.sh /opt/betl/bin/entrypoint.sh
+RUN chmod +x /opt/betl/bin/betl-ui /opt/betl/bin/entrypoint.sh
 
 ENV PATH=/opt/betl/bin:$PATH \
     BETL_PROVIDER_DIR=/opt/betl/lib/betl/providers \

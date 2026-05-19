@@ -1,0 +1,8 @@
+#!/bin/sh
+# In-image launcher for the betl yaml-ui. Picked up at PATH=/opt/betl/bin.
+exec /opt/betl/venv/bin/python /opt/betl/share/yaml-ui/server.py \
+    --host 0.0.0.0 \
+    --root "${BETL_ROOT:-/workspace}" \
+    --betl /opt/betl/bin/betl \
+    --dtsx2yaml /opt/betl/libexec/dtsx2yaml/Betl.Dtsx2Yaml \
+    "$@"
