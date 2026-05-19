@@ -26,7 +26,7 @@ public static class ExecuteSqlTask
     public static void Emit(YamlWriter w, DtsxPackage pkg, DtsxExecutable exe,
                             FlowAttrs? flow)
     {
-        w.Line($"- id: {YamlWriter.Id(exe.Name)}");
+        w.Line($"- id: {exe.BetlId}");
         w.Indent(2);
         FlowAttrs.Emit(w, flow);
 

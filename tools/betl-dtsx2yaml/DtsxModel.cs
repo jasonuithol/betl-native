@@ -75,6 +75,11 @@ public sealed class DtsxExecutable
      * Synthesised from the parent chain if the source XML omits the
      * DTS:refId attribute. */
     public string RefId       { get; set; } = "";
+    /* Deduplicated betl step id, populated by the converter's
+     * Catalogue() pass. Mappers MUST emit this rather than recomputing
+     * from Name, otherwise two executables with the same SSIS name
+     * collide on the same snake-cased id. */
+    public string BetlId      { get; set; } = "";
     /* Pipeline-only: components + paths inside the dataflow. */
     public List<DtsxComponent> Components { get; } = new();
     public List<DtsxPath>      Paths      { get; } = new();

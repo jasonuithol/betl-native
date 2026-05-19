@@ -209,6 +209,7 @@ public static class Converter
                 idCollisions[baseId] = 1;
             }
             refToLeafId[exe.RefId] = id;
+            exe.BetlId = id;
             leavesInOrder.Add(exe);
         }
         foreach (var exe in pkg.Executables) Catalogue(exe);
@@ -394,7 +395,7 @@ public static class Converter
                 Mappers.ExecuteProcessTask.Emit(w, pkg, exe, attrs);
                 break;
             default:
-                w.Line($"- id: {YamlWriter.Id(exe.Name)}");
+                w.Line($"- id: {exe.BetlId}");
                 w.Indent(2);
                 Mappers.FlowAttrs.Emit(w, attrs);
                 w.Comment($"TODO: executable type '{exe.Kind}' not yet supported "
@@ -502,7 +503,7 @@ public static class Converter
     static void EmitDataflow(YamlWriter w, DtsxPackage pkg, DtsxExecutable exe,
                              Mappers.FlowAttrs? flow, bool verbose)
     {
-        w.Line($"- id: {YamlWriter.Id(exe.Name)}");
+        w.Line($"- id: {exe.BetlId}");
         w.Indent(2);
         Mappers.FlowAttrs.Emit(w, flow);
         w.Line("type: dataflow");
