@@ -7,15 +7,22 @@ Tiny FastAPI backend for betl-yaml-ui.
 Then open http://127.0.0.1:8765/
 
 Endpoints:
-  GET /api/list?path=<rel>   list dirs + .yml/.yaml files under <root>/<rel>
-  GET /api/file?path=<rel>   return raw YAML text
-  PUT /api/file?path=<rel>   write raw YAML text (creates parents, overwrites)
+  GET  /api/list?path=<rel>[&exts=.yml,.yaml]
+                              list dirs + matching files under <root>/<rel>
+  GET  /api/file?path=<rel>   return raw YAML text
+  PUT  /api/file?path=<rel>   write raw YAML text (creates parents, overwrites)
+  POST /api/validate          body {path}   → runs `betl validate`
+  POST /api/convert           body {dtsx}   → runs dtsx2yaml; returns output path
+  POST /api/log               opaque text   → echo to server stderr
 
 All <rel> paths are resolved relative to --root and rejected if they escape it.
 """
 
 import argparse
+import json
 import os
+import shutil
+import subprocess
 import sys
 from pathlib import Path
 
@@ -30,6 +37,34 @@ except ImportError:
 
 HERE = Path(__file__).resolve().parent
 ALLOWED_EXTS = {".yml", ".yaml"}
+# Populated from CLI flags / env vars in main(). Workers spawned by
+# uvicorn --reload re-read these env vars at module import time.
+BETL_BIN: str | None = os.environ.get("BETL_BIN") or None
+DTSX2YAML_BIN: str | None = os.environ.get("BETL_DTSX2YAML") or None
+
+
+def discover_betl(root: Path) -> str | None:
+    """Find the betl CLI. Order: BETL_BIN env, PATH, <root>/build*/betl."""
+    if BETL_BIN and Path(BETL_BIN).exists():
+        return BETL_BIN
+    on_path = shutil.which("betl")
+    if on_path:
+        return on_path
+    for cand in ("build/betl", "build-make/betl", "build-asan/betl", "build-tsan/betl"):
+        p = root / cand
+        if p.exists():
+            return str(p)
+    return None
+
+
+def discover_dtsx2yaml(root: Path) -> str | None:
+    """Find the dtsx2yaml binary. Order: env, repo publish dir."""
+    if DTSX2YAML_BIN and Path(DTSX2YAML_BIN).exists():
+        return DTSX2YAML_BIN
+    cand = root / "tools/betl-dtsx2yaml/publish-linux-x64/Betl.Dtsx2Yaml"
+    if cand.exists():
+        return str(cand)
+    return None
 
 app = FastAPI(title="betl-yaml-ui")
 # When uvicorn runs with --reload, the child worker re-imports this
@@ -49,18 +84,22 @@ def safe(rel: str) -> Path:
 
 
 @app.get("/api/list")
-def list_dir(path: str = ""):
+def list_dir(path: str = "", exts: str = ""):
     p = safe(path)
     if not p.exists():
         raise HTTPException(404, "not found")
     if not p.is_dir():
         raise HTTPException(400, "not a directory")
+    if exts:
+        allowed = {("." + e.lstrip(".")).lower() for e in exts.split(",") if e.strip()}
+    else:
+        allowed = ALLOWED_EXTS
     dirs, files = [], []
     for entry in sorted(p.iterdir(), key=lambda e: (not e.is_dir(), e.name.lower())):
         rel = entry.relative_to(ROOT).as_posix()
         if entry.is_dir():
             dirs.append({"name": entry.name, "path": rel})
-        elif entry.suffix.lower() in ALLOWED_EXTS:
+        elif entry.suffix.lower() in allowed:
             files.append({"name": entry.name, "path": rel, "size": entry.stat().st_size})
     return {
         "root": ROOT.as_posix(),
@@ -104,6 +143,77 @@ async def log_event(request: Request):
     return {"ok": True}
 
 
+def _run(cmd: list[str], env_extra: dict | None = None, timeout: int = 120) -> dict:
+    """Execute `cmd`, capture stdout/stderr, never raise on non-zero rc."""
+    env = os.environ.copy()
+    if env_extra:
+        env.update(env_extra)
+    try:
+        cp = subprocess.run(cmd, env=env, capture_output=True, text=True, timeout=timeout)
+        return {
+            "rc": cp.returncode,
+            "stdout": cp.stdout,
+            "stderr": cp.stderr,
+            "cmd": cmd,
+        }
+    except subprocess.TimeoutExpired as e:
+        return {
+            "rc": -1,
+            "stdout": (e.stdout or "").decode() if isinstance(e.stdout, bytes) else (e.stdout or ""),
+            "stderr": f"timed out after {timeout}s",
+            "cmd": cmd,
+        }
+    except FileNotFoundError as e:
+        return {"rc": -2, "stdout": "", "stderr": str(e), "cmd": cmd}
+
+
+@app.get("/api/tools")
+def tools_info():
+    """Report which external tools the server can drive. The client uses
+    this to enable / disable the Validate and Convert buttons."""
+    return {
+        "betl": discover_betl(ROOT),
+        "dtsx2yaml": discover_dtsx2yaml(ROOT),
+    }
+
+
+@app.post("/api/validate")
+async def validate(request: Request):
+    body = json.loads((await request.body()).decode("utf-8") or "{}")
+    rel = body.get("path") or ""
+    p = safe(rel)
+    if not p.is_file():
+        raise HTTPException(404, "file not found")
+    betl = discover_betl(ROOT)
+    if not betl:
+        raise HTTPException(503, "betl binary not found — set BETL_BIN or pass --betl")
+    # Some local betl builds need deps/lib/ on LD_LIBRARY_PATH for libyaml.
+    deps_lib = (ROOT / "deps/lib").as_posix()
+    env_extra = {"LD_LIBRARY_PATH": deps_lib + ":" + os.environ.get("LD_LIBRARY_PATH", "")}
+    res = _run([betl, "validate", str(p)], env_extra=env_extra)
+    return res
+
+
+@app.post("/api/convert")
+async def convert(request: Request):
+    body = json.loads((await request.body()).decode("utf-8") or "{}")
+    rel = body.get("dtsx") or ""
+    p = safe(rel)
+    if not p.is_file():
+        raise HTTPException(404, "dtsx file not found")
+    if p.suffix.lower() != ".dtsx":
+        raise HTTPException(400, "input must be .dtsx")
+    bin_path = discover_dtsx2yaml(ROOT)
+    if not bin_path:
+        raise HTTPException(503,
+            "dtsx2yaml binary not found — build it (see tools/betl-dtsx2yaml/) "
+            "or set BETL_DTSX2YAML")
+    out_path = p.with_suffix(".betl.yml")
+    res = _run([bin_path, str(p), "-o", str(out_path)])
+    res["output"] = out_path.relative_to(ROOT).as_posix() if res["rc"] == 0 else None
+    return res
+
+
 # static viewer (registered last so /api/* routes win)
 app.mount("/", StaticFiles(directory=HERE, html=True), name="ui")
 
@@ -122,14 +232,31 @@ def main():
         action="store_true",
         help="auto-reload on code edits (dev mode)",
     )
+    ap.add_argument(
+        "--betl",
+        default=os.environ.get("BETL_BIN"),
+        help="path to the betl CLI (default: $BETL_BIN, PATH, then <root>/build*/betl)",
+    )
+    ap.add_argument(
+        "--dtsx2yaml",
+        default=os.environ.get("BETL_DTSX2YAML"),
+        help="path to the dtsx2yaml binary (default: $BETL_DTSX2YAML or "
+             "<root>/tools/betl-dtsx2yaml/publish-linux-x64/Betl.Dtsx2Yaml)",
+    )
     args = ap.parse_args()
 
     root = Path(args.root).resolve()
     if not root.is_dir():
         sys.exit(f"--root is not a directory: {root}")
     os.environ["BETL_YAML_UI_ROOT"] = str(root)
-    global ROOT
+    if args.betl:
+        os.environ["BETL_BIN"] = args.betl
+    if args.dtsx2yaml:
+        os.environ["BETL_DTSX2YAML"] = args.dtsx2yaml
+    global ROOT, BETL_BIN, DTSX2YAML_BIN
     ROOT = root
+    BETL_BIN = args.betl or BETL_BIN
+    DTSX2YAML_BIN = args.dtsx2yaml or DTSX2YAML_BIN
 
     print(f"betl-yaml-ui  ui={HERE}  root={ROOT}  ->  http://{args.host}:{args.port}/")
     if args.reload:

@@ -254,6 +254,47 @@
     font-size: 12px;
   }
 
+  /* ----------- validate / convert result modal ----------- */
+  .tool-result .tr-banner {
+    font-family: var(--mono);
+    font-size: 12px;
+    padding: 8px 10px;
+    border-radius: 6px;
+    margin-bottom: 10px;
+  }
+  .tool-result .tr-banner.ok  { background: #ecfdf5; color: #047857; border: 1px solid #a7f3d0; }
+  .tool-result .tr-banner.err { background: #fef2f2; color: #b91c1c; border: 1px solid #fecaca; }
+  body.dark .tool-result .tr-banner.ok  { background: #052e1e; color: #6ee7b7; border-color: #064e3b; }
+  body.dark .tool-result .tr-banner.err { background: #2d0e0e; color: #fca5a5; border-color: #5c1d1d; }
+  .tool-result .tr-cmd {
+    font-family: var(--mono);
+    font-size: 11px;
+    color: var(--muted);
+    margin-bottom: 6px;
+    word-break: break-all;
+  }
+  .tool-result h4 {
+    margin: 12px 0 4px;
+    font-size: 11px;
+    font-family: var(--mono);
+    color: var(--muted);
+    text-transform: uppercase;
+    letter-spacing: 0.05em;
+  }
+  .tool-result pre {
+    background: var(--bg);
+    border: 1px solid var(--line);
+    border-radius: 6px;
+    padding: 10px 12px;
+    margin: 0;
+    overflow: auto;
+    max-height: 35vh;
+    font-family: var(--mono);
+    font-size: 11px;
+    line-height: 1.5;
+    white-space: pre;
+  }
+
   /* ----------- source-mode editor ----------- */
   .src-pane {
     background: var(--panel);
@@ -570,6 +611,8 @@
   <button class="btn" id="browseBtn" title="Browse server files">browse&hellip;</button>
   <button class="btn" id="newBtn" title="Create a new YAML">new</button>
   <button class="btn" id="saveBtn" title="Save (Ctrl+S)">save</button>
+  <button class="btn" id="validateBtn" title="Run betl validate on the loaded file">validate</button>
+  <button class="btn" id="convertBtn" title="Convert a .dtsx via dtsx2yaml">convert dtsx&hellip;</button>
   <button class="btn" id="darkBtn" title="Toggle dark mode" aria-label="dark mode">&#9789;</button>
   <div class="toggle" id="viewModeToggle">
     <button data-viewmode="pipeline" class="active">Pipeline</button>
@@ -805,6 +848,7 @@ const state = {
   currentText: '',       // raw YAML text last loaded/saved (kept in sync in source mode)
   dirty: false,          // edits since last save
   hasComments: false,
+  tools: { betl: null, dtsx2yaml: null },  // populated by /api/tools on boot
 };
 
 const stage     = document.getElementById('stage');
@@ -1550,6 +1594,146 @@ function newPipeline() {
 document.getElementById('browseBtn').addEventListener('click', () => openBrowser(''));
 document.getElementById('saveBtn').addEventListener('click', saveCurrent);
 document.getElementById('newBtn').addEventListener('click', newPipeline);
+document.getElementById('validateBtn').addEventListener('click', runValidate);
+document.getElementById('convertBtn').addEventListener('click', openConvertBrowser);
+
+/* ---------- tools (validate / convert) ---------- */
+async function fetchToolsInfo() {
+  try {
+    const r = await fetch('/api/tools');
+    if (!r.ok) return;
+    const j = await r.json();
+    state.tools = { betl: j.betl || null, dtsx2yaml: j.dtsx2yaml || null };
+    updateToolButtons();
+  } catch (_) { /* offline; leave defaults */ }
+}
+
+function updateToolButtons() {
+  const vb = document.getElementById('validateBtn');
+  const cb = document.getElementById('convertBtn');
+  vb.disabled = !state.tools.betl;
+  vb.title = state.tools.betl
+    ? `Run \`betl validate\` on the loaded file`
+    : 'betl binary not found — set $BETL_BIN or pass --betl';
+  cb.disabled = !state.tools.dtsx2yaml;
+  cb.title = state.tools.dtsx2yaml
+    ? 'Pick a .dtsx and run dtsx2yaml'
+    : 'dtsx2yaml binary not found — build it or set $BETL_DTSX2YAML';
+}
+
+async function runValidate() {
+  if (!state.tools.betl) { toast('betl binary not configured', true); return; }
+  if (!state.currentPath) { toast('Load a YAML file first', true); return; }
+  // If there are unsaved edits, validating the saved file would
+  // mislead — surface that rather than silently checking stale text.
+  if (state.dirty) { toast('Save first — validate runs against the on-disk file', true); return; }
+  openModal('Running betl validate…', '<div style="color:var(--muted)">working…</div>', '');
+  let j;
+  try {
+    const r = await fetch('/api/validate', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ path: state.currentPath }),
+    });
+    j = await r.json();
+    if (!r.ok) throw new Error(j.detail || ('HTTP ' + r.status));
+  } catch (e) {
+    closeModal();
+    toast('Validate failed: ' + e.message, true);
+    return;
+  }
+  showToolResult('betl validate ' + state.currentPath, j);
+}
+
+function openConvertBrowser() {
+  if (!state.tools.dtsx2yaml) { toast('dtsx2yaml not configured', true); return; }
+  openDtsxBrowser('');
+}
+
+async function openDtsxBrowser(path) {
+  let j;
+  try {
+    const r = await fetch('/api/list?exts=.dtsx&path=' + encodeURIComponent(path));
+    if (!r.ok) throw new Error('HTTP ' + r.status);
+    j = await r.json();
+  } catch (e) {
+    toast('Browse failed: ' + e.message, true);
+    return;
+  }
+  const upPath = path ? dirnameOf(path) : null;
+  const upRow = upPath !== null
+    ? `<div class="entry" data-kind="dir" data-path="${esc(upPath)}">
+         <span class="icon">&#x21B0;</span><span class="name">..</span>
+       </div>`
+    : '';
+  const dirRows = j.dirs.map((d) =>
+    `<div class="entry" data-kind="dir" data-path="${esc(d.path)}">
+       <span class="icon">&#128193;</span><span class="name">${esc(d.name)}</span>
+     </div>`).join('');
+  const fileRows = j.files.map((f) =>
+    `<div class="entry" data-kind="file" data-path="${esc(f.path)}">
+       <span class="icon">&#128462;</span><span class="name">${esc(f.name)}</span>
+       <span class="size">${f.size} B</span>
+     </div>`).join('');
+  const where = j.path ? j.path : '<root>';
+  const body = `
+    <div class="bcrumb"><span class="root">root</span> / ${esc(where)}</div>
+    <div class="entries">${upRow}${dirRows}${fileRows}
+      ${(j.dirs.length + j.files.length === 0) ? '<div class="entry" style="color:var(--muted)">(no .dtsx here)</div>' : ''}
+    </div>`;
+  openModal('Pick a .dtsx to convert', body,
+    `<button class="btn" onclick="closeModal()">Cancel</button>`);
+  modalBody.querySelectorAll('.entry[data-kind="dir"]').forEach((el) =>
+    el.addEventListener('click', () => openDtsxBrowser(el.dataset.path)));
+  modalBody.querySelectorAll('.entry[data-kind="file"]').forEach((el) =>
+    el.addEventListener('click', () => runConvert(el.dataset.path)));
+}
+
+async function runConvert(dtsxPath) {
+  openModal('Running dtsx2yaml…',
+    `<div style="color:var(--muted)">converting ${esc(dtsxPath)}…</div>`, '');
+  let j;
+  try {
+    const r = await fetch('/api/convert', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ dtsx: dtsxPath }),
+    });
+    j = await r.json();
+    if (!r.ok) throw new Error(j.detail || ('HTTP ' + r.status));
+  } catch (e) {
+    closeModal();
+    toast('Convert failed: ' + e.message, true);
+    return;
+  }
+  // On success, load the produced YAML; on failure, surface the
+  // stdout/stderr like validate does.
+  if (j.rc === 0 && j.output) {
+    closeModal();
+    toast('Converted → ' + j.output);
+    loadServerFile(j.output);
+  } else {
+    showToolResult('dtsx2yaml ' + dtsxPath, j);
+  }
+}
+
+function showToolResult(title, j) {
+  const ok = j.rc === 0;
+  const banner = ok
+    ? `<div class="tr-banner ok">PASSED · rc = 0</div>`
+    : `<div class="tr-banner err">FAILED · rc = ${j.rc}</div>`;
+  const cmd = j.cmd && j.cmd.length
+    ? `<div class="tr-cmd">$ ${esc(j.cmd.join(' '))}</div>`
+    : '';
+  const sections = [];
+  if (j.stdout && j.stdout.length) sections.push(`<h4>stdout</h4><pre>${esc(j.stdout)}</pre>`);
+  if (j.stderr && j.stderr.length) sections.push(`<h4>stderr</h4><pre>${esc(j.stderr)}</pre>`);
+  if (!sections.length) sections.push(`<div style="color:var(--muted)">(no output)</div>`);
+  const body = `<div class="tool-result">${banner}${cmd}${sections.join('')}</div>`;
+  openModal(title, body, `<button class="btn" onclick="closeModal()">Close</button>`);
+}
+
+fetchToolsInfo();
 
 /* orientation toggle */
 document.getElementById('orientToggle').addEventListener('click', (e) => {
