@@ -71,12 +71,9 @@ public static class ExecuteSqlTask
         w.Line($"connection: {YamlWriter.Id(conn?.Name ?? "warehouse")}");
         if (!string.IsNullOrEmpty(sql))
         {
-            /* Use a YAML block scalar to preserve multi-line SQL. */
-            w.Line("sql: |");
-            w.Indent(2);
-            foreach (var line in sql.Replace("\r\n", "\n").Split('\n'))
-                w.Line(line);
-            w.Indent(-2);
+            /* Block scalar dedents common leading whitespace so SQL
+             * with mixed indentation parses cleanly. */
+            w.BlockScalar("sql", sql);
         }
         else
         {

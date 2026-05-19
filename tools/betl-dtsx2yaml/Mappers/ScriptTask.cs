@@ -38,10 +38,7 @@ public static class ScriptTask
             w.Line($"lang: {ScriptCommon.MapLang(ssisLang)}");
             w.Comment("TODO: SSIS Script Task has no recognisable main file");
             w.Comment("(expected <ProjectItem Name=\"ScriptMain.cs\"> or similar).");
-            w.Line("source: |");
-            w.Indent(2);
-            w.Line("// (user source not found in DTSX)");
-            w.Indent(-2);
+            w.BlockScalar("source", "// (user source not found in DTSX)");
             w.Indent(-2);
             return;
         }
@@ -52,11 +49,7 @@ public static class ScriptTask
         ScriptCommon.EmitTranslationHeader(w, prep,
             taskClass: "UserTask", baseClass: "Betl.BetlTask",
             entryMethod: "Run");
-        w.Line("source: |");
-        w.Indent(2);
-        foreach (var line in prep.Source.Split('\n'))
-            w.Line(line);
-        w.Indent(-2);
+        w.BlockScalar("source", prep.Source);
 
         w.Indent(-2);
     }

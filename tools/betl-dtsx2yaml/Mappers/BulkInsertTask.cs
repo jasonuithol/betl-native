@@ -71,10 +71,7 @@ public static class BulkInsertTask
             sb.Append(",\n  CODEPAGE = '").Append(codePg).Append("'");
         sb.Append("\n)");
 
-        w.Line("sql: |");
-        w.Indent(2);
-        foreach (var line in sb.ToString().Split('\n')) w.Line(line);
-        w.Indent(-2);
+        w.BlockScalar("sql", sb.ToString());
 
         w.Comment("note: SSIS Bulk Insert ran on the SQL Server host's");
         w.Comment("filesystem — the FROM path must be visible to the");

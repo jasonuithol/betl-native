@@ -26,6 +26,57 @@ public sealed class YamlWriter
 
     public void Indent(int n)      { _indent += n; }
 
+    /* Emit `<key>: |2` followed by `body` as a YAML literal block scalar.
+     *
+     * SSIS pastes SQL and script bodies verbatim, so the source mixes
+     * indentation: some lines flush to column 0, others indented two
+     * or four spaces. Without an explicit indent indicator YAML uses
+     * the FIRST non-empty content line to determine the block's
+     * required indent — any later line with fewer leading spaces
+     * terminates the literal early and the document fails to parse.
+     *
+     * The `|2` indicator pins the required indent at exactly two
+     * columns past the parent (= the writer's _indent when the
+     * content lines are emitted). Every Line() call prepends _indent
+     * spaces, so no content line can dip below the block's indent
+     * regardless of the original SQL's mixed leading whitespace.
+     *
+     * Tabs are expanded to four spaces because YAML rejects tab
+     * characters in indentation. We also dedent the global minimum
+     * leading-space count before emit — purely a readability win,
+     * since the `|2` indicator already keeps parsing unambiguous. */
+    public void BlockScalar(string key, string body)
+    {
+        Line(key + ": |2");
+        Indent(2);
+
+        var rawLines = (body ?? string.Empty).Replace("\r\n", "\n").Split('\n');
+        for (int i = 0; i < rawLines.Length; ++i)
+            rawLines[i] = rawLines[i].Replace("\t", "    ");
+
+        int minLead = int.MaxValue;
+        foreach (var line in rawLines)
+        {
+            if (line.Length == 0) continue;
+            int lead = 0;
+            while (lead < line.Length && line[lead] == ' ') lead++;
+            if (lead == line.Length) continue;  // all-whitespace line
+            if (lead < minLead) minLead = lead;
+        }
+        if (minLead == int.MaxValue) minLead = 0;
+
+        foreach (var line in rawLines)
+        {
+            if (line.Length == 0) { Line(); continue; }
+            int actualLead = 0;
+            while (actualLead < line.Length && line[actualLead] == ' ') actualLead++;
+            int strip = System.Math.Min(minLead, actualLead);
+            Line(line.Substring(strip));
+        }
+
+        Indent(-2);
+    }
+
     /* Quote a string for use as a YAML scalar where ambiguity is
      * possible (paths, SQL containing colons, etc.). Single-quoted
      * style with internal '' for embedded quotes — simplest YAML
