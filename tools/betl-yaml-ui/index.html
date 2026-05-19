@@ -254,6 +254,75 @@
     font-size: 12px;
   }
 
+  /* ----------- metadata strip (connections + parameters) ----------- */
+  .meta-panel {
+    background: var(--panel);
+    border: 1px solid var(--line);
+    border-radius: 8px;
+    padding: 10px 12px;
+    margin-bottom: 12px;
+    display: flex;
+    gap: 18px;
+    flex-wrap: wrap;
+  }
+  .meta-section {
+    flex: 1 1 240px;
+    min-width: 200px;
+  }
+  .meta-section .meta-head {
+    font-family: var(--mono);
+    font-size: 11px;
+    color: var(--muted);
+    text-transform: uppercase;
+    letter-spacing: 0.05em;
+    margin-bottom: 6px;
+    display: flex;
+    align-items: center;
+    gap: 6px;
+  }
+  .meta-section .meta-head .count {
+    background: var(--badge-bg);
+    color: var(--badge-fg);
+    border-radius: 10px;
+    padding: 0 7px;
+    font-size: 10px;
+    font-weight: 500;
+  }
+  .meta-chips { display: flex; flex-wrap: wrap; gap: 6px; }
+  .meta-chip {
+    display: inline-flex;
+    align-items: center;
+    gap: 6px;
+    padding: 4px 10px;
+    background: var(--bg);
+    border: 1px solid var(--line);
+    border-left: 3px solid var(--leaf);
+    border-radius: 4px;
+    font-family: var(--mono);
+    font-size: 12px;
+    cursor: pointer;
+    line-height: 1.3;
+  }
+  .meta-chip:hover { background: var(--hover); }
+  .meta-chip.selected {
+    background: var(--hover);
+    box-shadow: inset 0 0 0 1px var(--accent);
+  }
+  .meta-chip .chip-id { font-weight: 600; }
+  .meta-chip .chip-type { color: var(--muted); font-size: 11px; }
+  .meta-chip.k-mssql       { border-left-color: var(--sql); }
+  .meta-chip.k-postgres    { border-left-color: var(--df); }
+  .meta-chip.k-param-string,
+  .meta-chip.k-param-int,
+  .meta-chip.k-param-date,
+  .meta-chip.k-param-bool   { border-left-color: var(--map); }
+  .meta-empty {
+    color: var(--muted);
+    font-style: italic;
+    font-size: 11px;
+    font-family: var(--mono);
+  }
+
   /* ----------- validate / convert result modal ----------- */
   .tool-result .tr-banner {
     font-family: var(--mono);
@@ -866,13 +935,66 @@ function render() {
     renderSource();
     return;
   }
-  stage.innerHTML = flowTemplate.render(state.pipeline);
+  stage.innerHTML = renderMetaPanel() + flowTemplate.render(state.pipeline);
   if (state.selectedPath != null) {
-    stage.querySelectorAll(`[data-path="${state.selectedPath}"]`)
+    stage.querySelectorAll(`[data-path="${CSS.escape(state.selectedPath)}"]`)
       .forEach(el => el.classList.add('selected'));
   }
   // dagre runs after the DOM is in place so card sizes can be measured.
   requestAnimationFrame(applyFlowLayout);
+}
+
+/* Render the metadata strip above the pipeline canvas: top-level YAML
+ * sections that aren't visible in the flow view. Currently:
+ *   - connections (one chip per entry, color-coded by type)
+ *   - parameters  (one chip per entry, color-coded by type)
+ * Each chip carries a data-path so the existing inspector click handler
+ * opens it for edit. */
+function renderMetaPanel() {
+  const doc = state.rawDoc;
+  if (!doc) return '';
+  const conns = (doc.connections && typeof doc.connections === 'object')
+    ? doc.connections : {};
+  const params = (doc.parameters && typeof doc.parameters === 'object')
+    ? doc.parameters : {};
+  const cKeys = Object.keys(conns);
+  const pKeys = Object.keys(params);
+  if (cKeys.length === 0 && pKeys.length === 0) return '';
+
+  function chip(name, kindClass, type, path) {
+    return `<div class="meta-chip ${kindClass}" data-path="${esc(path)}"
+              role="button" tabindex="0">
+      <span class="chip-id">${esc(name)}</span>
+      ${type ? `<span class="chip-type">${esc(type)}</span>` : ''}
+    </div>`;
+  }
+
+  const connsHtml = cKeys.length
+    ? cKeys.map((k) => {
+        const v = conns[k] || {};
+        const t = typeof v === 'object' ? (v.type || '') : '';
+        return chip(k, t ? 'k-' + String(t).toLowerCase() : '', t, 'conn:' + k);
+      }).join('')
+    : '<div class="meta-empty">(none)</div>';
+
+  const paramsHtml = pKeys.length
+    ? pKeys.map((k) => {
+        const v = params[k] || {};
+        const t = typeof v === 'object' ? (v.type || '') : '';
+        return chip(k, t ? 'k-param-' + String(t).toLowerCase() : '', t, 'param:' + k);
+      }).join('')
+    : '<div class="meta-empty">(none)</div>';
+
+  return `<div class="meta-panel">
+    <div class="meta-section">
+      <div class="meta-head">connections <span class="count">${cKeys.length}</span></div>
+      <div class="meta-chips">${connsHtml}</div>
+    </div>
+    <div class="meta-section">
+      <div class="meta-head">parameters <span class="count">${pKeys.length}</span></div>
+      <div class="meta-chips">${paramsHtml}</div>
+    </div>
+  </div>`;
 }
 
 /* Source mode replaces the visual layout with a full-height textarea
@@ -1118,10 +1240,37 @@ stage.addEventListener('keydown', (e) => {
   openInspector(el.dataset.path);
 });
 
-function stepAt(path) {
-  if (path == null || path === '') return null;
+/* Path forms:
+ *   "0,1,2"      — pipeline step (comma-joined indices, legacy)
+ *   "conn:NAME"  — connection definition (state.rawDoc.connections[NAME])
+ *   "param:NAME" — parameter definition (state.rawDoc.parameters[NAME])
+ *
+ * nodeAt(path) returns the underlying object (mutable; edits flow back
+ * to state.rawDoc). nodeKind(path) reports the path's section so the
+ * inspector can pick the right field-ordering / breadcrumb. */
+function nodeKind(path) {
+  if (!path) return null;
+  const s = String(path);
+  if (s.startsWith('conn:'))  return 'conn';
+  if (s.startsWith('param:')) return 'param';
+  return 'pipeline';
+}
+
+function nodeAt(path) {
+  const kind = nodeKind(path);
+  if (!kind) return null;
+  const doc = state.rawDoc;
+  if (!doc) return null;
+  if (kind === 'conn') {
+    const name = String(path).slice('conn:'.length);
+    return (doc.connections && typeof doc.connections === 'object') ? doc.connections[name] : null;
+  }
+  if (kind === 'param') {
+    const name = String(path).slice('param:'.length);
+    return (doc.parameters && typeof doc.parameters === 'object') ? doc.parameters[name] : null;
+  }
   const parts = String(path).split(',').map(Number);
-  let arr = state.rawDoc && state.rawDoc.pipeline;
+  let arr = doc.pipeline;
   let cur = null;
   for (const idx of parts) {
     if (!Array.isArray(arr) || idx < 0 || idx >= arr.length) return null;
@@ -1129,6 +1278,14 @@ function stepAt(path) {
     arr = cur && cur.steps;
   }
   return cur;
+}
+
+/* stepAt kept as a thin alias for the existing call sites that
+ * specifically expect a pipeline-step (e.g. drill-down adds `,N` to
+ * the path, which only makes sense for the pipeline form). */
+function stepAt(path) {
+  if (nodeKind(path) !== 'pipeline') return null;
+  return nodeAt(path);
 }
 
 function loadYamlText(text, sourceName, serverPath) {
@@ -1278,12 +1435,12 @@ const inspectorCrumb = document.getElementById('inspectorCrumb');
 const RESERVED_KEYS = new Set(['id', 'type', 'after', 'steps', 'kind']);
 
 function openInspector(path) {
-  const step = stepAt(path);
-  if (!step) return;
+  const node = nodeAt(path);
+  if (!node) return;
   state.selectedPath = String(path);
   inspectorEl.classList.add('show');
   renderInspector();
-  render();   /* refresh to highlight the selected card */
+  render();   /* refresh to highlight the selected card / chip */
 }
 
 function closeInspector() {
@@ -1294,6 +1451,17 @@ function closeInspector() {
 }
 
 function pathCrumbHtml(path) {
+  const kind = nodeKind(path);
+  if (kind === 'conn') {
+    const name = String(path).slice('conn:'.length);
+    return '<span class="arrow">connections</span><span class="arrow">/</span>'
+         + '<span class="tail">' + esc(name) + '</span>';
+  }
+  if (kind === 'param') {
+    const name = String(path).slice('param:'.length);
+    return '<span class="arrow">parameters</span><span class="arrow">/</span>'
+         + '<span class="tail">' + esc(name) + '</span>';
+  }
   const parts = String(path).split(',').map(Number);
   const segs = [];
   let arr = state.rawDoc && state.rawDoc.pipeline;
@@ -1346,23 +1514,33 @@ function fieldEditor(key, val, opts) {
 }
 
 function renderInspector() {
-  const step = stepAt(state.selectedPath);
-  if (!step) { closeInspector(); return; }
+  const node = nodeAt(state.selectedPath);
+  if (!node) { closeInspector(); return; }
+  const kind = nodeKind(state.selectedPath);
   inspectorCrumb.innerHTML = pathCrumbHtml(state.selectedPath);
 
-  /* Order: id, type, after first, then any extras alphabetical, then steps last. */
-  const all = Object.keys(step).filter(k => k !== 'kind');
-  const front = ['id', 'type', 'after'].filter(k => k in step);
-  const extras = all.filter(k => !RESERVED_KEYS.has(k)).sort();
-  const hasSteps = Array.isArray(step.steps) && step.steps.length > 0;
+  /* Per-node-kind field ordering: pipeline steps lead with id/type/after,
+   * connections lead with type/dsn, parameters lead with type/default. */
+  const all = Object.keys(node).filter(k => k !== 'kind');
+  let front;
+  if (kind === 'conn') {
+    front = ['type', 'dsn'].filter(k => k in node);
+  } else if (kind === 'param') {
+    front = ['type', 'default', 'required', 'doc'].filter(k => k in node);
+  } else {
+    front = ['id', 'type', 'after'].filter(k => k in node);
+  }
+  const extras = all.filter(k => !RESERVED_KEYS.has(k) && !front.includes(k)).sort();
+  const hasSteps = kind === 'pipeline'
+    && Array.isArray(node.steps) && node.steps.length > 0;
 
-  const fieldsHtml = [...front, ...extras].map(k => fieldEditor(k, step[k])).join('');
+  const fieldsHtml = [...front, ...extras].map(k => fieldEditor(k, node[k])).join('');
 
   const nestedHtml = hasSteps
     ? `<div class="field">
-         <label>steps <span class="kindtag">${step.steps.length} nested</span></label>
+         <label>steps <span class="kindtag">${node.steps.length} nested</span></label>
          <div class="nested-list">
-           ${step.steps.map((s, j) => `
+           ${node.steps.map((s, j) => `
              <div class="nested-link" data-rel="${j}">
                <span class="nl-id">${esc(s.id || '?')}</span>
                <span class="nl-type">${esc(s.type || '')}</span>
@@ -1383,7 +1561,7 @@ function renderInspector() {
 }
 
 function applyInspector() {
-  const step = stepAt(state.selectedPath);
+  const step = nodeAt(state.selectedPath);
   if (!step) return;
   const inputs = inspectorBody.querySelectorAll('[data-key]');
   const updates = [];
@@ -1416,7 +1594,9 @@ function applyInspector() {
     }
   }
   if (changed) {
-    decorateStep(step);
+    /* decorate is only meaningful for pipeline steps; connections /
+     * parameters have no `kind` field. */
+    if (nodeKind(state.selectedPath) === 'pipeline') decorateStep(step);
     state.dirty = true;
     render();
     renderInspector();
