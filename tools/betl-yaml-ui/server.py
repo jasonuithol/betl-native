@@ -53,8 +53,6 @@ def list_dir(path: str = ""):
         raise HTTPException(400, "not a directory")
     dirs, files = [], []
     for entry in sorted(p.iterdir(), key=lambda e: (not e.is_dir(), e.name.lower())):
-        if entry.name.startswith("."):
-            continue
         rel = entry.relative_to(ROOT).as_posix()
         if entry.is_dir():
             dirs.append({"name": entry.name, "path": rel})
