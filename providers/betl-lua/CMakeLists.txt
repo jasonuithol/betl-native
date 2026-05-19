@@ -40,3 +40,7 @@ set_target_properties(betl-lua PROPERTIES
     PREFIX ""                       # produces betl-lua.so, not libbetl-lua.so
     C_VISIBILITY_PRESET hidden
 )
+
+# `cmake --install` lays providers out flat under lib/betl/providers so a
+# packaged betl can find them via $BETL_PROVIDER_DIR=<prefix>/lib/betl/providers.
+install(TARGETS betl-lua LIBRARY DESTINATION lib/betl/providers)

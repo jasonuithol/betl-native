@@ -20,5 +20,7 @@ set_target_properties(betl-dotnet PROPERTIES
 )
 target_link_libraries(betl-dotnet PRIVATE ${CMAKE_DL_LIBS})
 
+install(TARGETS betl-dotnet LIBRARY DESTINATION lib/betl/providers)
+
 set(BETL_DOTNET_FOUND  TRUE          PARENT_SCOPE)
 set(BETL_DOTNET_TARGET betl-dotnet   PARENT_SCOPE)

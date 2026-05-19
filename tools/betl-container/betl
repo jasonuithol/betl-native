@@ -1,0 +1,55 @@
+#!/usr/bin/env bash
+# tools/betl-container/betl — host-side wrapper for the betl container.
+#
+# Bind-mounts the current working directory at /workspace and forwards
+# the args. The first arg picks the tool:
+#
+#   betl validate file.yml       → run `betl validate` inside the container
+#   betl run     file.yml        → run `betl run`
+#   betl convert package.dtsx    → run dtsx2yaml; output lands next to source
+#   betl ui                      → start the yaml-ui at http://127.0.0.1:8765
+#   betl --version               → show engine version
+#
+# Build the image first (one-time, or after a source change):
+#   podman build -t betl:dev -f Containerfile .
+#
+# Override the image with $BETL_IMAGE if you've tagged it differently.
+# Override the runtime with $BETL_RUNTIME=podman|docker; auto-detects.
+
+set -euo pipefail
+
+image=${BETL_IMAGE:-betl:dev}
+
+# Pick container runtime.
+runtime=${BETL_RUNTIME:-}
+if [[ -z "$runtime" ]]; then
+    if command -v podman >/dev/null 2>&1; then runtime=podman
+    elif command -v docker >/dev/null 2>&1; then runtime=docker
+    else
+        echo "betl-container: no container runtime (podman/docker) found" >&2
+        exit 127
+    fi
+fi
+
+# Common run options. --userns=keep-id is podman-only; with docker we
+# rely on the user already running as a sensible UID inside.
+opts=(--rm
+      -v "$PWD:/workspace"
+      -w /workspace)
+if [[ "$runtime" == "podman" ]]; then
+    opts+=(--userns=keep-id)
+fi
+
+# `betl ui` needs a TTY-less port forward. Everything else gets an
+# interactive TTY iff stdin is one (so `betl validate` works in a
+# pipeline + still gives a usable prompt when run manually).
+case "${1:-}" in
+    ui)
+        opts+=(-p "${BETL_UI_PORT:-8765}:8765")
+        ;;
+    *)
+        if [[ -t 0 ]]; then opts+=(-it); fi
+        ;;
+esac
+
+exec "$runtime" run "${opts[@]}" "$image" "$@"

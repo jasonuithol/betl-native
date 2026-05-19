@@ -14,5 +14,7 @@ set_target_properties(betl-ssisexpr PROPERTIES
 )
 target_link_libraries(betl-ssisexpr PRIVATE m)
 
+install(TARGETS betl-ssisexpr LIBRARY DESTINATION lib/betl/providers)
+
 set(BETL_SSISEXPR_FOUND  TRUE              PARENT_SCOPE)
 set(BETL_SSISEXPR_TARGET betl-ssisexpr     PARENT_SCOPE)

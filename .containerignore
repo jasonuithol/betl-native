@@ -1,0 +1,35 @@
+# Trim the build context. Everything that wouldn't end up in a
+# released tarball is also excluded from the container build context.
+
+# VCS
+.git/
+.github/
+
+# Build outputs (cmake / .NET / Python venvs)
+build/
+build-asan/
+build-tsan/
+build-make/
+build-fuzz/
+build-*/
+**/bin/
+**/obj/
+**/publish-*/
+**/.venv/
+
+# Local dep installs (the image installs its own via apt)
+deps/
+
+# Dev-only / private
+.source-material/
+.claude/
+.env
+.env.local
+__pycache__/
+*.pyc
+
+# Forensics / coverage artefacts
+.forensics/
+*.gcda
+*.gcno
+coverage*/
