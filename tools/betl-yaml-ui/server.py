@@ -15,6 +15,7 @@ All <rel> paths are resolved relative to --root and rejected if they escape it.
 """
 
 import argparse
+import os
 import sys
 from pathlib import Path
 
@@ -31,7 +32,10 @@ HERE = Path(__file__).resolve().parent
 ALLOWED_EXTS = {".yml", ".yaml"}
 
 app = FastAPI(title="betl-yaml-ui")
-ROOT: Path = HERE  # set at startup
+# When uvicorn runs with --reload, the child worker re-imports this
+# module and main() does not execute there — so the chosen --root has
+# to survive via the environment.
+ROOT: Path = Path(os.environ.get("BETL_YAML_UI_ROOT", str(HERE))).resolve()
 
 
 def safe(rel: str) -> Path:
@@ -104,15 +108,32 @@ def main():
     )
     ap.add_argument("--host", default="127.0.0.1")
     ap.add_argument("--port", type=int, default=8765)
+    ap.add_argument(
+        "--reload",
+        action="store_true",
+        help="auto-reload on code edits (dev mode)",
+    )
     args = ap.parse_args()
 
+    root = Path(args.root).resolve()
+    if not root.is_dir():
+        sys.exit(f"--root is not a directory: {root}")
+    os.environ["BETL_YAML_UI_ROOT"] = str(root)
     global ROOT
-    ROOT = Path(args.root).resolve()
-    if not ROOT.is_dir():
-        sys.exit(f"--root is not a directory: {ROOT}")
+    ROOT = root
 
     print(f"betl-yaml-ui  ui={HERE}  root={ROOT}  ->  http://{args.host}:{args.port}/")
-    uvicorn.run(app, host=args.host, port=args.port, log_level="warning")
+    if args.reload:
+        uvicorn.run(
+            "server:app",
+            host=args.host,
+            port=args.port,
+            log_level="warning",
+            reload=True,
+            reload_dirs=[str(HERE)],
+        )
+    else:
+        uvicorn.run(app, host=args.host, port=args.port, log_level="warning")
 
 
 if __name__ == "__main__":
