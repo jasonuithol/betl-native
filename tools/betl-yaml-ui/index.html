@@ -555,6 +555,22 @@
     font-family: var(--mono);
   }
 
+  /* Inline emoji tag — fixed width + non-italic so the surrounding
+   * monospace layout doesn't shift between rows. Drawn slightly larger
+   * than the surrounding 12px text. */
+  .em-tag {
+    display: inline-block;
+    width: 1.3em;
+    text-align: center;
+    font-size: 14px;
+    line-height: 1;
+    font-style: normal;
+    font-variant-emoji: emoji;   /* opt out of text-style fallbacks */
+    flex-shrink: 0;
+  }
+  .meta-head .em-tag { font-size: 13px; }
+  .nested-link .em-tag { font-size: 12px; }
+
   /* ----------- validate / convert result modal ----------- */
   .tool-result .tr-banner {
     font-family: var(--mono);
@@ -984,6 +1000,82 @@ function classifyType(t) {
   return 'leaf';
 }
 
+/* Per-`type:` emoji table. Lookup is case-insensitive and exact —
+ * unknown types render with no emoji rather than a generic fallback so
+ * the absence is informative ("ah, this type isn't in the table yet"). */
+const TYPE_EMOJI = {
+  // connection kinds (used by meta-chips for connections)
+  'postgres':           '🐘',
+  'mssql':              '🗄️',
+  // stage kinds
+  'dataflow':           '🌊',
+  'container':          '📦',
+  'sequence':           '📦',
+  'foreach':            '🔁',
+  // sources
+  'csv.read':           '📥',
+  'xlsx.read':          '📊',
+  'xml.read':           '📰',
+  'json.read':          '🧾',
+  'postgres.read':      '🐘',
+  'mssql.read':         '🗄️',
+  'http.get':           '🌐',
+  'betl.gen_int64':     '🎲',
+  'betl.gen_strings':   '🎲',
+  // transforms
+  'filter':             '🧹',
+  'map':                '🗺️',
+  'lua.map':            '🗺️',
+  'sort':               '🔢',
+  'distinct':           '🦄',
+  'limit':              '✂️',
+  'union':              '➕',
+  'join':               '🔗',
+  'multicast':          '📡',
+  'conditional_split':  '🔀',
+  'aggregate':          '🧮',
+  'pivot':              '🔄',
+  'unpivot':            '🔄',
+  'audit':              '📋',
+  'postgres.lookup':    '🔍',
+  'mssql.lookup':       '🔍',
+  'postgres.exec':      '⚡',
+  'mssql.exec':         '⚡',
+  // sinks
+  'csv.write':          '📤',
+  'xlsx.write':         '📊',
+  'json.write':         '📤',
+  'postgres.copy':      '🐘',
+  'postgres.upsert':    '🐘',
+  'mssql.upsert':       '🗄️',
+  'mssql.bulkinsert':   '🚚',
+  'betl.count_rows':    '🔢',
+  // tasks
+  'sql.execute':        '⚡',
+  'var.set':            '🏷️',
+  'shell':              '🐚',
+  'file.copy':          '📋',
+  'file.move':          '🚚',
+  'file.delete':        '🗑️',
+  'http.post':          '🌐',
+  'smtp.send':          '📧',
+  'lua.task':           '🌙',
+  'dotnet.task':        '🟪',
+};
+
+function emojiForType(t) {
+  if (!t) return '';
+  return TYPE_EMOJI[String(t).toLowerCase()] || '';
+}
+
+/* Render an emoji as a sized inline span so it lines up consistently
+ * regardless of the actual glyph width. Wrapping also lets us key off
+ * the .em-tag class for CSS spacing without bleeding into siblings. */
+function emojiTag(t) {
+  const e = emojiForType(t);
+  return e ? `<span class="em-tag" aria-hidden="true">${e}</span>` : '';
+}
+
 /* decorateStep mutates the parsed YAML object in place, adding `kind` for
  * styling. The returned pipeline view shares object identity with rawDoc,
  * so edits made through the inspector flow back to the doc for save. */
@@ -1075,7 +1167,7 @@ function stepCard(step, path, portsByStep) {
     ).join('');
     return `<div class="step has-ports k-${kind}"${pathAttr}${idAttr}${fromAttr} role="button" tabindex="0">
       <div class="step-body">
-        <span class="id">${esc(step.id)}</span>
+        ${emojiTag(step.type)}<span class="id">${esc(step.id)}</span>
         <span class="ttype">${esc(step.type || '')}</span>
         ${after}
         ${innerCount}
@@ -1084,7 +1176,7 @@ function stepCard(step, path, portsByStep) {
     </div>`;
   }
   return `<div class="step k-${kind}"${pathAttr}${idAttr}${fromAttr} role="button" tabindex="0">
-    <span class="id">${esc(step.id)}</span>
+    ${emojiTag(step.type)}<span class="id">${esc(step.id)}</span>
     <span class="ttype">${esc(step.type || '')}</span>
     ${after}
     ${innerCount}
@@ -1129,7 +1221,7 @@ const flowTemplate = {
       : `<div class="empty">no children</div>`;
     return `<section class="flow-section">
       <div class="flow-head k-${step.kind || 'leaf'}" data-path="${i}" role="button" tabindex="0">
-        <span class="id">${esc(step.id)}</span>
+        ${emojiTag(step.type)}<span class="id">${esc(step.id)}</span>
         <span class="meta">${esc(step.type || '')}</span>
         <span class="meta">${(step.steps || []).length} children</span>
       </div>
@@ -1208,14 +1300,18 @@ function renderMetaBar() {
   function chip(name, kindClass, type, path) {
     return `<div class="meta-chip ${kindClass}" data-path="${esc(path)}"
               role="button" tabindex="0">
-      <span class="chip-id">${esc(name)}</span>
+      ${emojiTag(type)}<span class="chip-id">${esc(name)}</span>
       ${type ? `<span class="chip-type">${esc(type)}</span>` : ''}
     </div>`;
   }
 
-  function box(label, keys, chipsHtml) {
+  function box(headEmoji, label, keys, chipsHtml) {
     return `<div class="meta-box">
-      <div class="meta-head">${label} <span class="count">${keys.length}</span></div>
+      <div class="meta-head">
+        <span class="em-tag" aria-hidden="true">${headEmoji}</span>
+        ${label}
+        <span class="count">${keys.length}</span>
+      </div>
       <div class="meta-chips">${chipsHtml || '<div class="meta-empty">(none)</div>'}</div>
     </div>`;
   }
@@ -1232,8 +1328,8 @@ function renderMetaBar() {
     return chip(k, t ? 'k-param-' + String(t).toLowerCase() : '', t, 'param:' + k);
   }).join('');
 
-  metaBar.innerHTML = box('connections', cKeys, connsHtml)
-                    + box('parameters',  pKeys, paramsHtml);
+  metaBar.innerHTML = box('🔌',  'connections', cKeys, connsHtml)
+                    + box('🎛️', 'parameters',  pKeys, paramsHtml);
   metaBar.hidden = false;
 }
 
@@ -1870,7 +1966,7 @@ function renderInspector() {
          <div class="nested-list">
            ${node.steps.map((s, j) => `
              <div class="nested-link" data-rel="${j}">
-               <span class="nl-id">${esc(s.id || '?')}</span>
+               ${emojiTag(s.type)}<span class="nl-id">${esc(s.id || '?')}</span>
                <span class="nl-type">${esc(s.type || '')}</span>
              </div>`).join('')}
          </div>
