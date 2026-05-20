@@ -91,6 +91,26 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
         # UI runtime
         python3 \
         python3-venv \
+        # Needed by the msodbcsql18 install below (fetch + dearmor the
+        # Microsoft repo key). Kept in the image — useful for debugging.
+        curl \
+        gnupg \
+    && rm -rf /var/lib/apt/lists/*
+
+# Microsoft ODBC Driver 18 for SQL Server. Required by every betl
+# mssql.* component (and the yaml-ui "Test connection" feature) when
+# the DSN says `Driver={ODBC Driver 18 for SQL Server}`. Wires
+# packages.microsoft.com into apt via a signed-by keyring (so the key
+# doesn't enter the global trust store) and accepts the EULA non-
+# interactively. ~30 MB added to the runtime image.
+RUN install -d -m 0755 /etc/apt/keyrings \
+    && curl -fsSL https://packages.microsoft.com/keys/microsoft.asc \
+         | gpg --dearmor -o /etc/apt/keyrings/microsoft.gpg \
+    && chmod 0644 /etc/apt/keyrings/microsoft.gpg \
+    && echo "deb [signed-by=/etc/apt/keyrings/microsoft.gpg arch=amd64] https://packages.microsoft.com/debian/12/prod bookworm main" \
+         > /etc/apt/sources.list.d/mssql-release.list \
+    && apt-get update \
+    && ACCEPT_EULA=Y apt-get install -y --no-install-recommends msodbcsql18 \
     && rm -rf /var/lib/apt/lists/*
 
 COPY --from=build /opt/betl /opt/betl
