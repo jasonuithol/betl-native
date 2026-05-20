@@ -13,6 +13,7 @@ Endpoints:
   PUT  /api/file?path=<rel>   write raw YAML text (creates parents, overwrites)
   POST /api/validate          body {path}   → runs `betl validate`
   POST /api/convert           body {dtsx}   → runs dtsx2yaml; returns output path
+  POST /api/test-connection   body {name,type,dsn} → run a SELECT-1 test pipeline
   POST /api/log               opaque text   → echo to server stderr
 
 All <rel> paths are resolved relative to --root and rejected if they escape it.
@@ -21,9 +22,11 @@ All <rel> paths are resolved relative to --root and rejected if they escape it.
 import argparse
 import json
 import os
+import re
 import shutil
 import subprocess
 import sys
+import tempfile
 from pathlib import Path
 
 try:
@@ -211,6 +214,66 @@ async def convert(request: Request):
     out_path = p.with_suffix(".betl.yml")
     res = _run([bin_path, str(p), "-o", str(out_path)])
     res["output"] = out_path.relative_to(ROOT).as_posix() if res["rc"] == 0 else None
+    return res
+
+
+_IDENT_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
+
+
+@app.post("/api/test-connection")
+async def test_connection(request: Request):
+    """Synthesize a tiny pipeline that opens this connection and runs
+    `SELECT 1`, then run it via `betl run`. The result's rc + stdout +
+    stderr tell the user whether the DSN and credentials are good.
+
+    Body: {"name": "warehouse", "type": "postgres", "dsn": "..."}.
+    Only postgres / mssql are testable today (sql.execute's dispatch). """
+    body = json.loads((await request.body()).decode("utf-8") or "{}")
+    name = (body.get("name") or "").strip()
+    ctype = (body.get("type") or "").strip()
+    dsn = body.get("dsn") or ""
+    if not name or not _IDENT_RE.match(name):
+        raise HTTPException(400, "connection name must be a simple identifier")
+    if ctype not in ("postgres", "mssql"):
+        raise HTTPException(
+            400,
+            f"connection type '{ctype}' is not testable (supported: postgres, mssql)"
+        )
+    if not isinstance(dsn, str) or not dsn:
+        raise HTTPException(400, "connection has no dsn to test")
+
+    betl = discover_betl(ROOT)
+    if not betl:
+        raise HTTPException(503, "betl binary not found — set BETL_BIN or pass --betl")
+
+    # JSON-encoded scalars are also valid YAML, so this dodges every
+    # quoting / escape ambiguity in the user-supplied DSN.
+    yaml_text = (
+        "betl: 1\n"
+        "name: __ui_conn_test\n"
+        "connections:\n"
+        f"  {name}:\n"
+        f"    type: {json.dumps(ctype)}\n"
+        f"    dsn: {json.dumps(dsn)}\n"
+        "pipeline:\n"
+        "  - id: __ping\n"
+        "    type: sql.execute\n"
+        f"    connection: {json.dumps(name)}\n"
+        '    sql: "SELECT 1"\n'
+    )
+
+    fd, tmp_path = tempfile.mkstemp(prefix="betl-test-conn-", suffix=".yml")
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as f:
+            f.write(yaml_text)
+        deps_lib = (ROOT / "deps/lib").as_posix()
+        env_extra = {
+            "LD_LIBRARY_PATH": deps_lib + ":" + os.environ.get("LD_LIBRARY_PATH", "")
+        }
+        res = _run([betl, "run", tmp_path], env_extra=env_extra, timeout=30)
+    finally:
+        try: os.unlink(tmp_path)
+        except OSError: pass
     return res
 
 

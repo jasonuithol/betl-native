@@ -335,6 +335,26 @@
   .field .edit-conn:hover { background: var(--hover); }
   .field label { display: flex; align-items: center; gap: 6px; }
 
+  /* ----------- per-connection actions strip (Test connection, …) ----------- */
+  .conn-actions {
+    display: flex; align-items: center; gap: 8px;
+    margin: 0 0 10px 0;
+    padding: 8px 10px;
+    border: 1px solid var(--line);
+    background: var(--panel-2, var(--panel));
+    border-radius: 6px;
+  }
+  .conn-actions .btn {
+    font-family: var(--mono); font-size: 11px;
+    padding: 4px 10px;
+    border: 1px solid var(--line-strong);
+    background: var(--panel); color: var(--text);
+    border-radius: 4px; cursor: pointer;
+  }
+  .conn-actions .btn:hover:not([disabled]) { background: var(--hover); }
+  .conn-actions .btn[disabled] { opacity: 0.5; cursor: not-allowed; }
+  .conn-actions .hint { color: var(--muted); font-family: var(--mono); font-size: 11px; }
+
   /* ----------- connection-string pair editor ----------- */
   .cs-modal {
     position: fixed; inset: 0;
@@ -1800,6 +1820,23 @@ function renderInspector() {
 
   const fieldsHtml = [...front, ...extras].map(k => fieldEditor(k, node[k])).join('');
 
+  /* Connection-only action strip: Test connection. Shown above the fields
+   * so the user can iterate "edit DSN → test → repeat" without scrolling.
+   * Button is only disabled when betl itself is missing — the type /
+   * dsn checks happen at click time against the current draft, so
+   * unapplied edits get tested too. */
+  let actionsHtml = '';
+  if (kind === 'conn') {
+    const haveBetl = !!(state.tools && state.tools.betl);
+    const reason = haveBetl
+      ? 'Open this connection and run SELECT 1 (postgres / mssql only)'
+      : 'betl binary not found — set $BETL_BIN or pass --betl';
+    actionsHtml = `<div class="conn-actions">
+      <button class="btn test-conn" ${haveBetl ? '' : 'disabled'} title="${esc(reason)}">Test connection</button>
+      <span class="hint">runs <code>SELECT 1</code> via <code>betl run</code></span>
+    </div>`;
+  }
+
   const nestedHtml = hasSteps
     ? `<div class="field">
          <label>steps <span class="kindtag">${node.steps.length} nested</span></label>
@@ -1813,7 +1850,12 @@ function renderInspector() {
        </div>`
     : '';
 
-  inspectorBody.innerHTML = fieldsHtml + nestedHtml;
+  inspectorBody.innerHTML = actionsHtml + fieldsHtml + nestedHtml;
+
+  /* "Test connection" button — POSTs the *current draft* values (read
+   * straight from the inputs, so unapplied edits are tested). */
+  const testBtn = inspectorBody.querySelector('.test-conn');
+  if (testBtn) testBtn.addEventListener('click', testCurrentConnection);
 
   /* drill-down: clicking a nested step opens it in the inspector */
   inspectorBody.querySelectorAll('.nested-link').forEach((el) => {
@@ -2009,6 +2051,64 @@ function openConnStringEditor(input, keyLabel) {
   });
   overlay.addEventListener('click', (e) => { if (e.target === overlay) close(); });
   document.addEventListener('keydown', onKey, true);
+}
+
+/* Read each inspector field straight from its DOM input. Unlike
+ * applyInspector this does not mutate state — it just snapshots the
+ * draft so "Test connection" can probe values that haven't been
+ * Apply'd yet. */
+function inspectorDraft() {
+  const out = {};
+  const inputs = inspectorBody.querySelectorAll('[data-key]');
+  for (const inp of inputs) {
+    const k = inp.dataset.key;
+    const kind = inp.dataset.kind;
+    const v = inp.value;
+    try {
+      if (kind === 'strlist') {
+        const arr = v.split(',').map(x => x.trim()).filter(Boolean);
+        if (arr.length) out[k] = arr;
+      } else if (kind === 'yaml') {
+        if (v.trim() !== '') out[k] = jsyaml.load(v);
+      } else if (v !== '') {
+        out[k] = v;
+      }
+    } catch (_) { /* ignore — server will surface real errors */ }
+  }
+  return out;
+}
+
+async function testCurrentConnection() {
+  if (nodeKind(state.selectedPath) !== 'conn') return;
+  const name = String(state.selectedPath).slice('conn:'.length);
+  const draft = inspectorDraft();
+  const ctype = String(draft.type || '').toLowerCase();
+  if (ctype !== 'postgres' && ctype !== 'mssql') {
+    toast(`Type '${ctype || '?'}' isn't testable (postgres, mssql)`, true);
+    return;
+  }
+  if (!draft.dsn) {
+    toast('Connection has no dsn to test', true);
+    return;
+  }
+  openModal('Testing connection…',
+            `<div style="color:var(--muted)">opening <code>${esc(name)}</code> and running <code>SELECT 1</code>…</div>`,
+            '');
+  let j;
+  try {
+    const r = await fetch('/api/test-connection', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ name, type: ctype, dsn: draft.dsn }),
+    });
+    j = await r.json();
+    if (!r.ok) throw new Error(j.detail || ('HTTP ' + r.status));
+  } catch (e) {
+    closeModal();
+    toast('Test failed: ' + e.message, true);
+    return;
+  }
+  showToolResult(`test-connection ${name}`, j);
 }
 
 function applyInspector() {
