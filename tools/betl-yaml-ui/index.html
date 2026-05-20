@@ -475,36 +475,47 @@
     white-space: pre-wrap;
   }
 
-  /* ----------- metadata strip (connections + parameters) ----------- */
-  .meta-panel {
+  /* ----------- metadata strip (connections + parameters) -----------
+   *
+   * Rendered as a second row of the sticky header: flush with the
+   * toolbar above (shares its bottom border), square corners on both
+   * the containing boxes and the chips inside, so the strip reads as
+   * header furniture rather than canvas content. */
+  .meta-bar {
     background: var(--panel);
-    border: 1px solid var(--line);
-    border-radius: 8px;
-    padding: 10px 12px;
-    margin-bottom: 12px;
+    border-bottom: 1px solid var(--line);
+    padding: 8px 14px;
     display: flex;
-    gap: 18px;
+    gap: 10px;
     flex-wrap: wrap;
+    align-items: stretch;
   }
-  .meta-section {
-    flex: 1 1 240px;
-    min-width: 200px;
+  .meta-bar[hidden] { display: none; }
+  .meta-box {
+    flex: 1 1 280px;
+    min-width: 220px;
+    background: var(--bg);
+    border: 1px solid var(--line);
+    border-radius: 0;        /* square — distinct from rounded step cards */
+    padding: 6px 10px 8px;
+    display: flex;
+    flex-direction: column;
+    gap: 6px;
   }
-  .meta-section .meta-head {
+  .meta-box .meta-head {
     font-family: var(--mono);
     font-size: 11px;
     color: var(--muted);
     text-transform: uppercase;
     letter-spacing: 0.05em;
-    margin-bottom: 6px;
     display: flex;
     align-items: center;
     gap: 6px;
   }
-  .meta-section .meta-head .count {
+  .meta-box .meta-head .count {
     background: var(--badge-bg);
     color: var(--badge-fg);
-    border-radius: 10px;
+    border-radius: 0;        /* square count badge too */
     padding: 0 7px;
     font-size: 10px;
     font-weight: 500;
@@ -514,11 +525,11 @@
     display: inline-flex;
     align-items: center;
     gap: 6px;
-    padding: 4px 10px;
-    background: var(--bg);
+    padding: 3px 9px;
+    background: var(--panel);
     border: 1px solid var(--line);
     border-left: 3px solid var(--leaf);
-    border-radius: 4px;
+    border-radius: 0;        /* square chips — not little step cards */
     font-family: var(--mono);
     font-size: 12px;
     cursor: pointer;
@@ -920,6 +931,8 @@
   </div>
 </header>
 
+<div class="meta-bar" id="metaBar" hidden></div>
+
 <main id="stage"></main>
 <div class="modal" id="modal">
   <div class="modal-card">
@@ -1144,6 +1157,7 @@ const state = {
 };
 
 const stage     = document.getElementById('stage');
+const metaBar   = document.getElementById('metaBar');
 const pkgName   = document.getElementById('pkgName');
 const pathCrumb = document.getElementById('pathCrumb');
 
@@ -1152,35 +1166,44 @@ function render() {
   const tag = state.currentPath ? '@ ' + state.currentPath : '';
   pathCrumb.innerHTML = tag + (state.dirty ? ' <span class="dirty"></span>' : '');
   syncHeaderForMode();
+  // In source mode the meta-bar would just be noise — hide it.
   if (state.viewMode === 'source') {
+    metaBar.hidden = true;
     renderSource();
     return;
   }
-  stage.innerHTML = renderMetaPanel() + flowTemplate.render(state.pipeline);
+  renderMetaBar();
+  stage.innerHTML = flowTemplate.render(state.pipeline);
   if (state.selectedPath != null) {
-    stage.querySelectorAll(`[data-path="${CSS.escape(state.selectedPath)}"]`)
+    document.querySelectorAll(`[data-path="${CSS.escape(state.selectedPath)}"]`)
       .forEach(el => el.classList.add('selected'));
   }
   // dagre runs after the DOM is in place so card sizes can be measured.
   requestAnimationFrame(applyFlowLayout);
 }
 
-/* Render the metadata strip above the pipeline canvas: top-level YAML
- * sections that aren't visible in the flow view. Currently:
- *   - connections (one chip per entry, color-coded by type)
- *   - parameters  (one chip per entry, color-coded by type)
- * Each chip carries a data-path so the existing inspector click handler
- * opens it for edit. */
-function renderMetaPanel() {
+/* Render the metadata strip directly into #metaBar (a sibling of <main>,
+ * not part of the canvas). Two separate boxes — connections and
+ * parameters — with square corners and panel background, so the strip
+ * reads as a second row of the header rather than as canvas content.
+ * Each chip carries a data-path; clicks are picked up by the metaBar
+ * click delegate below. */
+function renderMetaBar() {
   const doc = state.rawDoc;
-  if (!doc) return '';
-  const conns = (doc.connections && typeof doc.connections === 'object')
+  const conns = (doc && doc.connections && typeof doc.connections === 'object')
     ? doc.connections : {};
-  const params = (doc.parameters && typeof doc.parameters === 'object')
+  const params = (doc && doc.parameters && typeof doc.parameters === 'object')
     ? doc.parameters : {};
   const cKeys = Object.keys(conns);
   const pKeys = Object.keys(params);
-  if (cKeys.length === 0 && pKeys.length === 0) return '';
+
+  // Hide the whole bar when neither section has anything — avoids a
+  // dead strip on small pipelines.
+  if (cKeys.length === 0 && pKeys.length === 0) {
+    metaBar.innerHTML = '';
+    metaBar.hidden = true;
+    return;
+  }
 
   function chip(name, kindClass, type, path) {
     return `<div class="meta-chip ${kindClass}" data-path="${esc(path)}"
@@ -1190,32 +1213,28 @@ function renderMetaPanel() {
     </div>`;
   }
 
-  const connsHtml = cKeys.length
-    ? cKeys.map((k) => {
-        const v = conns[k] || {};
-        const t = typeof v === 'object' ? (v.type || '') : '';
-        return chip(k, t ? 'k-' + String(t).toLowerCase() : '', t, 'conn:' + k);
-      }).join('')
-    : '<div class="meta-empty">(none)</div>';
+  function box(label, keys, chipsHtml) {
+    return `<div class="meta-box">
+      <div class="meta-head">${label} <span class="count">${keys.length}</span></div>
+      <div class="meta-chips">${chipsHtml || '<div class="meta-empty">(none)</div>'}</div>
+    </div>`;
+  }
 
-  const paramsHtml = pKeys.length
-    ? pKeys.map((k) => {
-        const v = params[k] || {};
-        const t = typeof v === 'object' ? (v.type || '') : '';
-        return chip(k, t ? 'k-param-' + String(t).toLowerCase() : '', t, 'param:' + k);
-      }).join('')
-    : '<div class="meta-empty">(none)</div>';
+  const connsHtml = cKeys.map((k) => {
+    const v = conns[k] || {};
+    const t = typeof v === 'object' ? (v.type || '') : '';
+    return chip(k, t ? 'k-' + String(t).toLowerCase() : '', t, 'conn:' + k);
+  }).join('');
 
-  return `<div class="meta-panel">
-    <div class="meta-section">
-      <div class="meta-head">connections <span class="count">${cKeys.length}</span></div>
-      <div class="meta-chips">${connsHtml}</div>
-    </div>
-    <div class="meta-section">
-      <div class="meta-head">parameters <span class="count">${pKeys.length}</span></div>
-      <div class="meta-chips">${paramsHtml}</div>
-    </div>
-  </div>`;
+  const paramsHtml = pKeys.map((k) => {
+    const v = params[k] || {};
+    const t = typeof v === 'object' ? (v.type || '') : '';
+    return chip(k, t ? 'k-param-' + String(t).toLowerCase() : '', t, 'param:' + k);
+  }).join('');
+
+  metaBar.innerHTML = box('connections', cKeys, connsHtml)
+                    + box('parameters',  pKeys, paramsHtml);
+  metaBar.hidden = false;
 }
 
 /* Source mode replaces the visual layout with a full-height textarea
@@ -1447,19 +1466,24 @@ function applyFlowLayout() {
   }
 }
 
-/* step click → inspector */
-stage.addEventListener('click', (e) => {
-  const el = e.target.closest('[data-path]');
-  if (!el || !stage.contains(el)) return;
-  openInspector(el.dataset.path);
-});
-stage.addEventListener('keydown', (e) => {
-  if (e.key !== 'Enter' && e.key !== ' ') return;
-  const el = e.target.closest('[data-path]');
-  if (!el) return;
-  e.preventDefault();
-  openInspector(el.dataset.path);
-});
+/* step / chip click → inspector. metaBar lives outside <main> now, so
+ * we delegate from both hosts. */
+function onPathActivate(host) {
+  host.addEventListener('click', (e) => {
+    const el = e.target.closest('[data-path]');
+    if (!el || !host.contains(el)) return;
+    openInspector(el.dataset.path);
+  });
+  host.addEventListener('keydown', (e) => {
+    if (e.key !== 'Enter' && e.key !== ' ') return;
+    const el = e.target.closest('[data-path]');
+    if (!el || !host.contains(el)) return;
+    e.preventDefault();
+    openInspector(el.dataset.path);
+  });
+}
+onPathActivate(stage);
+onPathActivate(metaBar);
 
 /* Path forms:
  *   "0,1,2"      — pipeline step (comma-joined indices, legacy)
@@ -1551,6 +1575,9 @@ function showParseError(label, text, e) {
   // Keep state.currentText and state.currentPath so the user can flip
   // to Source mode and fix the broken YAML in place.
   closeInspector();
+  // Stale chips from the previously-loaded file would mislead.
+  metaBar.innerHTML = '';
+  metaBar.hidden = true;
 
   pkgName.textContent = '(parse error)';
   pathCrumb.innerHTML = '@ ' + esc(label);
