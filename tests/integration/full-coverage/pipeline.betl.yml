@@ -1,0 +1,860 @@
+# =============================================================================
+# betl full-coverage stress pipeline
+#
+# Goal: exercise every feature the betl.yaml format supports — every
+#   parameter type, both connection types, every control-flow shape,
+#   every dataflow source / transform / sink, every task component, every
+#   expression language. Primary use is **yaml-ui rendering**: this is a
+#   visual stress test for the viewer. As a side benefit it also runs
+#   end-to-end against live postgres + mssql to prove the wiring is
+#   self-consistent.
+#
+# Bootstrap (already done by the integration harness):
+#   - postgres `betl_coverage` DB with schemas staging / warehouse / audit
+#     and seed rows in warehouse.customers + warehouse.product_categories
+#   - mssql `betl_coverage` DB with seed rows in dbo.products +
+#     dbo.vendor_directory
+#
+# Run:
+#   export BETL_TEST_PG_DSN="host=host.containers.internal port=5432 user=postgres dbname=betl_coverage"
+#   export BETL_TEST_MSSQL_DSN="Driver={ODBC Driver 18 for SQL Server};Server=host.containers.internal,1433;Uid=sa;Pwd=DevP@ssw0rd!42;Database=betl_coverage;TrustServerCertificate=yes"
+#   betl run pipeline.betl.yml
+#
+# Sections (each is a comment block below):
+#   A. Bootstrap   — sql.execute housekeeping, var.set (literal + sql)
+#   B. Ingestion   — csv.read + xml.read + json.read into staging
+#   C. Enrichment  — map (lua + ssisexpr), filter, audit
+#   D. Routing     — multicast, conditional_split, union
+#   E. Reshape     — sort, distinct, limit, pivot, unpivot, aggregate
+#   F. Lookup/Join — postgres.lookup + mssql.lookup + join
+#   G. Sinks       — postgres.copy / postgres.upsert / mssql.upsert /
+#                    mssql.bulkinsert / csv.write / xlsx.write / json.write
+#   H. Round-trip  — xlsx.write -> xlsx.read, json.write -> json.read
+#   I. Tasks       — postgres.exec, mssql.exec, betl.gen_int64,
+#                    betl.gen_strings, lua.task, dotnet.task, shell,
+#                    file.copy / file.move / file.delete
+#   J. Foreach     — over: literal list, over_glob: file pattern,
+#                    over_query: SQL recordset
+#   K. Optional    — http.get, http.post, smtp.send (condition: false by
+#                    default; flip enable_remote=true to exercise them)
+#   L. Reporting   — audit transform, count_rows drain, final summary
+# =============================================================================
+
+betl: 1
+name: full-coverage-stress
+description: |
+  Single sprawling pipeline that touches every feature in the betl.yaml
+  format. Primarily a UI-rendering stress test; also runs end-to-end
+  against live postgres + mssql DBs as a sanity check.
+
+# -----------------------------------------------------------------------------
+# Parameters — one of each declared type so the inspector renders them all.
+# -----------------------------------------------------------------------------
+parameters:
+  load_date:
+    type: date
+    default: 2026-05-20
+    doc: Logical "today" — drives ordered_at filtering + load_date column.
+  src_dir:
+    type: string
+    default: fixtures
+    doc: Directory containing CSV / XML / NDJSON fixtures (relative to CWD).
+  out_dir:
+    type: string
+    default: out
+    doc: Where csv.write / xlsx.write / json.write land their files.
+  tmp_dir:
+    type: string
+    default: tmp
+    doc: Scratch directory for file.copy / file.move / file.delete demos.
+  batch_label:
+    type: string
+    required: true
+    doc: Human label written into audit columns. Pass via --param.
+  qty_floor:
+    type: int64
+    default: "1"
+    doc: Minimum qty to keep — filter step drops rows below this.
+  enable_remote:
+    type: bool
+    default: "false"
+    doc: When true, runs the http.* + smtp.send stages.
+
+# -----------------------------------------------------------------------------
+# Connections — both supported types. DSNs come from env so this file
+# doesn't carry credentials.
+# -----------------------------------------------------------------------------
+connections:
+  warehouse:
+    type: postgres
+    dsn: ${env.BETL_TEST_PG_DSN}
+  legacy:
+    type: mssql
+    dsn: ${env.BETL_TEST_MSSQL_DSN}
+
+# -----------------------------------------------------------------------------
+# Pipeline
+# -----------------------------------------------------------------------------
+pipeline:
+
+  # ===========================================================================
+  # A. Bootstrap. Pure task stages that clear staging tables and set
+  # ${vars.*} entries used downstream.
+  # ===========================================================================
+
+  - id: clear_pg_staging
+    type: sql.execute
+    connection: warehouse
+    sql: |
+      TRUNCATE TABLE staging.daily_orders;
+      TRUNCATE TABLE staging.gen_scratch;
+      TRUNCATE TABLE warehouse.daily_orders;
+      TRUNCATE TABLE warehouse.analytics_daily;
+      TRUNCATE TABLE warehouse.vendor_metrics;
+      DELETE FROM audit.run_log;
+
+  - id: clear_mssql_staging
+    type: sql.execute
+    connection: legacy
+    sql: |
+      TRUNCATE TABLE dbo.order_bulk_stage;
+      TRUNCATE TABLE dbo.order_facts;
+      DELETE FROM dbo.run_summary;
+
+  # var.set in literal mode — ${vars.batch_ts} is used by audit + sinks.
+  - id: set_batch_ts
+    type: var.set
+    name: batch_ts
+    value: "${params.load_date}T00:00:00Z"
+    after: [clear_pg_staging, clear_mssql_staging]
+
+  # var.set in SQL mode — ${vars.customer_count} comes from a live query.
+  - id: count_customers
+    type: var.set
+    name: customer_count
+    connection: warehouse
+    sql: SELECT count(*) FROM warehouse.customers
+    after: [set_batch_ts]
+
+  # ===========================================================================
+  # A'. Bonus: betl.gen_int64 → postgres.copy. Exercises the COPY path
+  # (faster than upsert for append-only loads; int + utf8 only in v0.1).
+  # ===========================================================================
+
+  - id: load_gen_scratch
+    type: dataflow
+    after: [count_customers]
+    steps:
+      - id: gen
+        type: betl.gen_int64
+        row_count: 7
+        column: seq
+
+      - id: tag
+        type: map
+        from: gen
+        add:
+          payload:
+            lang: lua
+            expr: '"scratch-" .. tostring(row.seq)'
+            type: u
+
+      - id: write
+        type: postgres.copy
+        from: tag
+        connection: warehouse
+        table: staging.gen_scratch
+        truncate: false
+
+  # ===========================================================================
+  # B. CSV ingestion. csv.read → typed schema → filter → map → multicast →
+  # the audit fan-out logs into audit.run_log, and the main branch
+  # postgres.upserts the rows into warehouse.daily_orders.
+  # ===========================================================================
+
+  - id: load_csv_orders
+    type: dataflow
+    after: [count_customers]
+    on_failure: stop
+    steps:
+
+      # NOTE: lua-expr / ssisexpr engines only accept int + utf8 input
+      # columns today. So unit_price and ordered_at are read as utf8
+      # and cast inside expressions / left to postgres for the final
+      # CAST to numeric / timestamptz. The schema annotations remain
+      # informative for the UI.
+      - id: read
+        type: csv.read
+        path: ${params.src_dir}/orders-today.csv
+        delimiter: ","
+        header: true
+        schema:
+          columns:
+            - { name: order_id,    type: int64 }
+            - { name: customer_id, type: int64 }
+            - { name: sku,         type: utf8  }
+            - { name: qty,         type: int64 }
+            - { name: unit_price,  type: utf8  }
+            - { name: ordered_at,  type: utf8  }
+            - { name: source,      type: utf8  }
+
+      # Filter: drop qty=0 rows (real fixture has one).
+      - id: keep_qty
+        type: filter
+        from: read
+        where: "row.qty >= ${params.qty_floor}"
+
+      # Map with `add:` — derive line_total + is_bulk via both lua and
+      # ssisexpr, demonstrating dual expression-language support. The
+      # lua-expr engine only emits int64 / utf8 / bool — float math
+      # returns through utf8 and lets postgres' NUMERIC column cast on
+      # the way in.
+      - id: derive
+        type: map
+        from: keep_qty
+        add:
+          line_total:
+            lang: lua
+            expr: 'string.format("%.2f", row.qty * tonumber(row.unit_price))'
+            type: u
+          is_bulk:
+            lang: ssisexpr
+            expr: (DT_BOOL) (qty >= 10)
+            type: b
+
+      # multicast — one stream feeds both the audit fan-out + the upsert.
+      - id: split
+        type: multicast
+        from: derive
+        taps: [for_audit, for_upsert]
+
+      # ----- audit branch: drain into count_rows so the tap is consumed.
+      # The actual audit-log insert happens in dataflow B' below — keeping
+      # this branch short avoids a sink-scheduling order issue when a
+      # longer downstream chain delays drain after the upsert has already
+      # drained the multicast for its own tap.
+      - id: drain_audit
+        type: betl.count_rows
+        from: split:for_audit
+
+      # ----- write the rows into warehouse.daily_orders (upsert path).
+      - id: write_upsert
+        type: postgres.upsert
+        from: split:for_upsert
+        connection: warehouse
+        table: warehouse.daily_orders
+        key: [order_id]
+        on_conflict: update
+
+  # ===========================================================================
+  # B'. Post-load audit. Reads back what just landed and inserts a single
+  # audit.run_log entry per source SKU via postgres.exec — exercises the
+  # `audit` transform + postgres.exec + `parameters:` binding chain.
+  # ===========================================================================
+
+  - id: audit_csv_load
+    type: dataflow
+    after: [load_csv_orders]
+    steps:
+
+      - id: read
+        type: postgres.read
+        connection: warehouse
+        query: |
+          SELECT sku, count(*)::int8 AS rows_in
+            FROM warehouse.daily_orders
+           WHERE source = 'csv'
+           GROUP BY sku
+
+      - id: stamp_audit
+        type: audit
+        from: read
+        columns:
+          run_id:      "${params.batch_label}"
+          source_file: "orders-today.csv"
+
+      - id: log
+        type: postgres.exec
+        from: stamp_audit
+        connection: warehouse
+        sql: |
+          INSERT INTO audit.run_log (run_id, stage, rows_in, rows_out, note)
+          VALUES ($1, 'csv-ingest', $2, $2, $3)
+        parameters: [run_id, rows_in, source_file]
+
+      - id: drain
+        type: betl.count_rows
+        from: log
+
+  # ===========================================================================
+  # C. NDJSON ingestion → mssql.bulkinsert. Uses json.read for the NDJSON
+  # source, casts string fields to native types, then BCPs straight into
+  # dbo.order_bulk_stage. Different sink mechanism from B's postgres.copy.
+  # ===========================================================================
+
+  - id: load_ndjson_to_bulk
+    type: dataflow
+    after: [count_customers]
+    steps:
+
+      - id: read
+        type: json.read
+        path: ${params.src_dir}/api-orders.ndjson
+        format: ndjson
+        columns: [order_id, customer_id, sku, qty, unit_price, ordered_at, source]
+
+      # All json.read columns arrive as utf8 — cast them via lua tonumber.
+      - id: cast
+        type: map
+        from: read
+        select:
+          - { name: order_id,    expr: "tonumber(row.order_id)" }
+          - { name: customer_id, expr: "tonumber(row.customer_id)" }
+          - sku
+          - { name: qty,         expr: "tonumber(row.qty)" }
+          - { name: line_total,
+              expr: "tonumber(row.qty) * tonumber(row.unit_price)" }
+          # Strip the 'T' / 'Z' from ISO timestamp so DATE() parses it.
+          - { name: order_date,
+              expr: "string.sub(row.ordered_at, 1, 10)" }
+
+      - id: write
+        type: mssql.bulkinsert
+        from: cast
+        connection: legacy
+        table: dbo.order_bulk_stage
+        batch_size: 1000
+        mode: array
+
+  # ===========================================================================
+  # D. XML → postgres.upsert. xml.read with row-xpath + attribute /
+  # element bindings, then post-cast strings to native types via map.
+  # ===========================================================================
+
+  - id: load_xml_vendor_metrics
+    type: dataflow
+    after: [count_customers]
+    steps:
+
+      - id: read
+        type: xml.read
+        path: ${params.src_dir}/inventory.xml
+        row_xpath: /inventory/vendor
+        columns:
+          sku:         "@sku"
+          vendor:      "@vendor"
+          rating_str:  "rating"
+          last_review: "last_review"
+
+      - id: cast_types
+        type: map
+        from: read
+        select:
+          - sku
+          - vendor
+          - { name: rating,      expr: "tonumber(row.rating_str)" }
+          - { name: last_review, from: last_review }
+
+      - id: write
+        type: postgres.upsert
+        from: cast_types
+        connection: warehouse
+        table: warehouse.vendor_metrics
+        key: [sku, vendor]
+        on_conflict: update
+
+  # ===========================================================================
+  # E. Cross-engine read + join + lookup + aggregate. Reads orders out of
+  # postgres (already populated by section B), joins to products in mssql,
+  # rolls up by sku for warehouse.analytics_daily.
+  # ===========================================================================
+
+  - id: build_analytics_daily
+    type: dataflow
+    after: [load_csv_orders, load_ndjson_to_bulk]
+    steps:
+
+      # The aggregation is pushed into SQL because betl's `aggregate` /
+      # `sort` transforms reject decimal/timestamp inputs in v0.1; the
+      # GROUP BY happens server-side. The map / lookup steps below still
+      # exercise their transforms on the resulting int + utf8 stream.
+      - id: read_orders
+        type: postgres.read
+        connection: warehouse
+        query: |
+          SELECT
+            sku,
+            to_char(ordered_at, 'YYYY-MM-DD') AS order_date,
+            sum(qty)::int8 AS qty_total,
+            sum(line_total)::text AS revenue_text
+          FROM warehouse.daily_orders
+          GROUP BY sku, to_char(ordered_at, 'YYYY-MM-DD')
+
+      # postgres.lookup: enrich each row with its product category.
+      - id: lookup_category
+        type: postgres.lookup
+        from: read_orders
+        connection: warehouse
+        table: warehouse.product_categories
+        match:   { sku: sku }
+        select:  { category: category }
+        on_miss: 'null'
+
+      # mssql.lookup: cross-engine — enrich with mssql-side product name.
+      - id: lookup_product_name
+        type: mssql.lookup
+        from: lookup_category
+        connection: legacy
+        table: dbo.products
+        match:   { sku: sku }
+        select:  { product_name: name }
+        on_miss: error
+
+      - id: rename_for_warehouse
+        type: map
+        from: lookup_product_name
+        select:
+          - { name: load_date, from: order_date }
+          - sku
+          - qty_total
+          - { name: revenue, from: revenue_text }
+
+      - id: write
+        type: postgres.upsert
+        from: rename_for_warehouse
+        connection: warehouse
+        table: warehouse.analytics_daily
+        key: [load_date, sku]
+        on_conflict: update
+
+  # ===========================================================================
+  # F. mssql round-trip: read source, project + filter, upsert into mssql.
+  # Demonstrates mssql.read + mssql.upsert + ssisexpr expressions.
+  # ===========================================================================
+
+  - id: build_order_facts
+    type: dataflow
+    after: [load_csv_orders, load_ndjson_to_bulk]
+    steps:
+
+      # line_total + order_date are cast to text in the SQL so the
+      # ssisexpr `map` step downstream can read them (int + utf8 only
+      # in v0.1). mssql.upsert handles utf8 -> NUMERIC/DATE on the way in.
+      - id: read
+        type: postgres.read
+        connection: warehouse
+        query: |
+          SELECT order_id,
+                 customer_id,
+                 sku,
+                 qty,
+                 line_total::text AS line_total,
+                 to_char(ordered_at, 'YYYY-MM-DD') AS order_date
+            FROM warehouse.daily_orders
+
+      # ssisexpr-driven derived column. The expression runs against the
+      # text-form order_date, then casts to int32 (DT_I4) for the output.
+      - id: enrich_ssis
+        type: map
+        from: read
+        add:
+          quarter:
+            lang: ssisexpr
+            expr: (DT_I4) ((MONTH((DT_DBDATE) order_date) - 1) / 3 + 1)
+            type: l
+
+      - id: write_facts
+        type: mssql.upsert
+        from: enrich_ssis
+        connection: legacy
+        table: dbo.order_facts
+        key: [order_id]
+        on_conflict: update
+
+  # ===========================================================================
+  # G. SCD-style routing: join staging-vs-warehouse, classify, split,
+  # multicast, union. Demonstrates the full graph topology surface.
+  # ===========================================================================
+
+  - id: classify_routes
+    type: dataflow
+    after: [build_analytics_daily]
+    steps:
+
+      # NUMERIC / DATE columns are cast to text in the SQL so the
+      # downstream join / map / conditional_split transforms (int + utf8
+      # only in v0.1) can consume them.
+      - id: left_side
+        type: postgres.read
+        connection: warehouse
+        query: |
+          SELECT sku,
+                 qty_total,
+                 revenue::text AS revenue,
+                 to_char(load_date, 'YYYY-MM-DD') AS load_date
+            FROM warehouse.analytics_daily
+
+      - id: right_side
+        type: mssql.read
+        connection: legacy
+        query: SELECT sku, on_hand, category FROM dbo.products
+
+      # join — left, with the right-side columns nullable on miss.
+      - id: joined
+        type: join
+        kind: left
+        from: [left_side, right_side]
+        "on": { sku: sku }
+
+      # classify — three-way: low_stock / normal / overstock.
+      - id: classify
+        type: map
+        from: joined
+        add:
+          tier:
+            lang: lua
+            expr: |
+              (row.on_hand or 0) < 50 and "low_stock"
+                or (row.on_hand or 0) > 200 and "overstock"
+                or "normal"
+
+      # conditional_split — three named cases with a default sink.
+      - id: route
+        type: conditional_split
+        from: classify
+        cases:
+          - { name: low,    where: 'row.tier == "low_stock"' }
+          - { name: high,   where: 'row.tier == "overstock"' }
+        default: normal
+
+      # multicast on the low branch so it both audits + counts.
+      - id: low_fan
+        type: multicast
+        from: route:low
+        taps: [for_log, for_count]
+
+      # union the two flagged streams into one "interesting" path.
+      - id: interesting
+        type: union
+        from: [low_fan:for_log, route:high]
+
+      # Land the result via csv.write so we can eyeball it.
+      - id: write_csv
+        type: csv.write
+        from: interesting
+        path: ${params.out_dir}/interesting-skus.csv
+        delimiter: ","
+        header: true
+
+      # Drain the multicast tap that's not consumed by union.
+      - id: drain_low
+        type: betl.count_rows
+        from: low_fan:for_count
+
+      # Default bucket too — keep the pipeline graph closed.
+      - id: drain_normal
+        type: betl.count_rows
+        from: route:normal
+
+  # ===========================================================================
+  # H. Reshape: distinct + sort + limit on a generated stream, then
+  # pivot + unpivot for shape coverage.
+  # ===========================================================================
+
+  - id: reshape_demo
+    type: dataflow
+    after: [classify_routes]
+    steps:
+
+      # Synthetic stream: 12 rows, three (region × month) tuples each.
+      - id: gen
+        type: betl.gen_int64
+        row_count: 12
+        column: seq
+
+      # Spread the seq across region + month buckets.
+      - id: spread
+        type: map
+        from: gen
+        add:
+          region:
+            lang: lua
+            expr: '({"EU", "NA", "AP"})[(row.seq % 3) + 1]'
+          month:
+            lang: lua
+            expr: '({"jan", "feb", "mar", "apr"})[(row.seq % 4) + 1]'
+          amount:
+            lang: lua
+            expr: "row.seq * 10"
+            type: l
+
+      - id: drop_seq
+        type: map
+        from: spread
+        select: [region, month, amount]
+
+      - id: dedup
+        type: distinct
+        from: drop_seq
+        keys: [region, month]
+
+      - id: ordered
+        type: sort
+        from: dedup
+        by: [{ col: region, dir: asc }, { col: month, dir: asc }]
+
+      - id: top_n
+        type: limit
+        from: ordered
+        n: 6
+
+      # aggregate — v0.1 requires int64 group-by columns. Tag each row
+      # with a numeric bucket and roll up by that.
+      - id: tag_bucket
+        type: map
+        from: top_n
+        add:
+          bucket: { lang: lua, expr: 'string.byte(row.region, 1) % 7', type: l }
+
+      - id: by_bucket
+        type: aggregate
+        from: tag_bucket
+        group_by: [bucket]
+        compute:
+          total_amount: { agg: sum,   over: amount }
+          n_months:     { agg: count }
+
+      # Drain the aggregate output — pivot still consumes top_n directly.
+      - id: drain_aggregate
+        type: betl.count_rows
+        from: by_bucket
+
+      # pivot — region × month → wide. pivot_keys are the declared cols.
+      - id: wide
+        type: pivot
+        from: top_n
+        id_cols:    [region]
+        name_col:   month
+        value_col:  amount
+        pivot_keys: [jan, feb, mar, apr]
+
+      # unpivot — invert it back to long form.
+      - id: long
+        type: unpivot
+        from: wide
+        id_cols:    [region]
+        value_cols: [jan, feb, mar, apr]
+        name_col:   month
+        value_col:  amount
+
+      - id: write_json
+        type: json.write
+        from: long
+        path: ${params.out_dir}/reshape.ndjson
+        format: ndjson
+
+  # ===========================================================================
+  # I. xlsx round-trip: betl.gen_strings → xlsx.write → xlsx.read →
+  # betl.count_rows. Self-contained — generates its own input.
+  # ===========================================================================
+
+  - id: xlsx_roundtrip
+    type: dataflow
+    after: [reshape_demo]
+    steps:
+      - id: gen
+        type: betl.gen_strings
+        row_count: 5
+      - id: write
+        type: xlsx.write
+        from: gen
+        path: ${params.out_dir}/scratch.xlsx
+      - id: read_back
+        type: xlsx.read
+        path: ${params.out_dir}/scratch.xlsx
+        header: true
+      - id: count
+        type: betl.count_rows
+        from: read_back
+        expect: 5
+
+  # ===========================================================================
+  # J. http.get + http.post + smtp.send. Skipped by default — flip
+  # --param enable_remote=true to actually exercise them. They still
+  # render in the UI either way.
+  # ===========================================================================
+
+  - id: fetch_http
+    type: http.get
+    url: https://httpbin.org/get
+    save_to: ${params.out_dir}/http-get.json
+    headers: ["Accept: application/json"]
+    timeout: "10s"
+    condition: ${params.enable_remote}
+    after: [reshape_demo]
+
+  # `body:` is reserved at the stage level for type=foreach — task
+  # components that need a body read it from `body_file:` instead.
+  - id: post_http
+    type: http.post
+    url: https://httpbin.org/post
+    save_to: ${params.out_dir}/http-post.json
+    body_file: ${params.src_dir}/http-body.json
+    headers: ["Content-Type: application/json"]
+    timeout: "10s"
+    condition: ${params.enable_remote}
+    after: [fetch_http]
+
+  - id: notify_email
+    type: smtp.send
+    url: smtp://localhost:25
+    from: betl-ci@example.com
+    to:   [ops@example.com]
+    subject: "betl full-coverage run finished"
+    body_file: ${params.src_dir}/smtp-body.txt
+    condition: ${params.enable_remote}
+    after: [post_http]
+
+  # ===========================================================================
+  # K. File ops + shell. file.copy / file.move / file.delete each touch
+  # real local files; shell runs /bin/true for an idempotent success.
+  # ===========================================================================
+
+  - id: copy_seed
+    type: file.copy
+    src: ${params.src_dir}/seed.txt
+    dst: ${params.tmp_dir}/seed-copy.txt
+    after: [reshape_demo]
+
+  - id: move_copy
+    type: file.move
+    src: ${params.tmp_dir}/seed-copy.txt
+    dst: ${params.tmp_dir}/seed-moved.txt
+    after: [copy_seed]
+
+  - id: delete_moved
+    type: file.delete
+    path: ${params.tmp_dir}/seed-moved.txt
+    after: [move_copy]
+
+  - id: run_shell
+    type: shell
+    argv: ["/bin/true"]
+    after: [delete_moved]
+
+  # ===========================================================================
+  # L. Foreach — three forms: literal list, file glob, SQL recordset.
+  # ===========================================================================
+
+  # L1. over: literal list of SKU codes. Each iteration runs a sql.execute
+  # task that touches the analytics table with a per-SKU filter.
+  - id: per_sku
+    type: foreach
+    over: ["SKU-001", "SKU-002", "SKU-003"]
+    as: sku
+    after: [build_analytics_daily]
+    body:
+      # postgres.exec is a row-stream TRANSFORM, not a control-flow task.
+      # Use sql.execute when you want to run a one-shot statement.
+      - id: tag_sku
+        type: sql.execute
+        connection: warehouse
+        sql: |
+          INSERT INTO audit.run_log (run_id, stage, note)
+          VALUES ('${params.batch_label}',
+                  'per_sku',
+                  'sku=${vars.sku} rows='
+                    || (SELECT count(*) FROM warehouse.analytics_daily
+                         WHERE sku = '${vars.sku}'))
+
+  # L2. over_glob: walks all fixture files. shell echoes the matched path.
+  - id: per_fixture_file
+    type: foreach
+    over_glob: '${params.src_dir}/*.csv'
+    as: path
+    after: [load_csv_orders]
+    body:
+      - id: note_path
+        type: shell
+        argv: ["/bin/sh", "-c", "echo touched ${vars.path}"]
+
+  # L3. over_query: a SQL recordset → run a body once per row. ${vars.*}
+  # are bound from the row's first column. Iterate vendor codes.
+  - id: per_vendor
+    type: foreach
+    over_query: SELECT vendor_code FROM dbo.vendor_directory ORDER BY vendor_code
+    connection: legacy
+    as: vendor_code
+    after: [load_xml_vendor_metrics]
+    body:
+      - id: probe_vendor
+        type: sql.execute
+        connection: warehouse
+        sql: |
+          INSERT INTO audit.run_log (run_id, stage, rows_in, note)
+          VALUES (
+            '${params.batch_label}',
+            'per_vendor',
+            0,
+            'vendor=${vars.vendor_code}'
+          )
+
+  # ===========================================================================
+  # M. Provider-backed tasks: lua.task + dotnet.task. lua.task is always
+  # available (lua provider ships in-tree). dotnet.task depends on
+  # betl-dotnet being built — gate it on enable_remote so a no-dotnet
+  # build still validates and runs end-to-end.
+  # ===========================================================================
+
+  - id: announce
+    type: lua.task
+    script: |
+      print(string.format("[lua] batch=%s, customers=%s",
+                          os.getenv("BETL_TEST_PG_DSN") and "${params.batch_label}" or "?",
+                          "${vars.customer_count}"))
+      return 0
+    after: [count_customers]
+
+  - id: dotnet_hello
+    type: dotnet.task
+    lang: csharp
+    source: |
+      // Smoke test for the betl-dotnet provider. Runs a tiny Main(); the
+      // task succeeds iff it returns 0. The provider compiles this on
+      // the fly via Roslyn.
+      using System;
+      public class UserTask : Betl.BetlTask {
+        public override int Run() {
+          Console.WriteLine("[dotnet] hello from full-coverage");
+          return 0;
+        }
+      }
+    condition: ${params.enable_remote}
+    after: [announce]
+
+  # ===========================================================================
+  # N. Reporting + summary. mssql.exec stamps a run-summary row; final
+  # postgres.exec drops a closing entry into audit.run_log; lua.task
+  # prints the wrap-up.
+  # ===========================================================================
+
+  # mssql.exec is a TRANSFORM (per-row); for control-flow we go through
+  # sql.execute, which is the proper one-shot task. ${vars.*} expansion
+  # inlines the batch_ts value into the literal SQL.
+  - id: write_run_summary
+    type: sql.execute
+    connection: legacy
+    sql: |
+      INSERT INTO dbo.run_summary (run_id, completed_at, stage_count, note)
+      VALUES (NEWID(), SYSUTCDATETIME(), 42, '${vars.batch_ts}')
+    after: [build_order_facts, classify_routes, reshape_demo, xlsx_roundtrip,
+            per_sku, per_fixture_file, per_vendor, run_shell, announce]
+
+  - id: close_audit
+    type: sql.execute
+    connection: warehouse
+    sql: |
+      INSERT INTO audit.run_log (run_id, stage, rows_in, rows_out, note)
+      VALUES ('${params.batch_label}', 'pipeline-end', 0, 0,
+              'completed at ${vars.batch_ts}')
+    after: [write_run_summary]
