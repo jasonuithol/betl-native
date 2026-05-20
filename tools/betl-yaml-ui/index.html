@@ -614,6 +614,39 @@
     overflow-wrap: anywhere;
   }
 
+  /* ----------- run-pipeline param form ----------- */
+  .run-form {
+    display: flex; flex-direction: column; gap: 10px;
+    max-height: 60vh; overflow-y: auto;
+  }
+  .run-row { display: flex; flex-direction: column; gap: 4px; }
+  .run-row label {
+    font-family: var(--mono); font-size: 12px;
+    display: flex; align-items: center; gap: 6px;
+  }
+  .run-row .run-type {
+    color: var(--muted); font-size: 11px;
+    background: var(--badge-bg); padding: 0 6px; border-radius: 0;
+  }
+  .run-row .run-doc {
+    color: var(--muted); font-size: 11px;
+    font-family: var(--mono); margin-top: 2px; white-space: pre-wrap;
+  }
+  .run-row input[type=text],
+  .run-row input[type=number],
+  .run-row input[type=date] {
+    font-family: var(--mono); font-size: 12px;
+    padding: 6px 8px;
+    border: 1px solid var(--line-strong);
+    border-radius: 4px;
+    background: var(--panel); color: var(--text);
+  }
+  .run-row input[type=checkbox] { width: 18px; height: 18px; }
+  .modal-foot .btn.primary {
+    background: var(--accent); color: white;
+    border-color: var(--accent);
+  }
+
   /* ----------- source-mode editor ----------- */
   .src-pane {
     background: var(--panel);
@@ -931,6 +964,7 @@
   <button class="btn" id="newBtn" title="Create a new YAML">new</button>
   <button class="btn" id="saveBtn" title="Save (Ctrl+S)">save</button>
   <button class="btn" id="validateBtn" title="Run betl validate on the loaded file">validate</button>
+  <button class="btn" id="runBtn" title="Run betl run on the loaded file">run&hellip;</button>
   <button class="btn" id="convertBtn" title="Convert a .dtsx via dtsx2yaml">convert dtsx&hellip;</button>
   <button class="btn" id="darkBtn" title="Toggle dark mode" aria-label="dark mode">&#9789;</button>
   <div class="toggle" id="viewModeToggle">
@@ -2451,6 +2485,7 @@ document.getElementById('browseBtn').addEventListener('click', () => openBrowser
 document.getElementById('saveBtn').addEventListener('click', saveCurrent);
 document.getElementById('newBtn').addEventListener('click', newPipeline);
 document.getElementById('validateBtn').addEventListener('click', runValidate);
+document.getElementById('runBtn').addEventListener('click', openRunDialog);
 document.getElementById('convertBtn').addEventListener('click', openConvertBrowser);
 
 /* ---------- tools (validate / convert) ---------- */
@@ -2466,10 +2501,15 @@ async function fetchToolsInfo() {
 
 function updateToolButtons() {
   const vb = document.getElementById('validateBtn');
+  const rb = document.getElementById('runBtn');
   const cb = document.getElementById('convertBtn');
   vb.disabled = !state.tools.betl;
   vb.title = state.tools.betl
     ? `Run \`betl validate\` on the loaded file`
+    : 'betl binary not found — set $BETL_BIN or pass --betl';
+  rb.disabled = !state.tools.betl;
+  rb.title = state.tools.betl
+    ? 'Run `betl run` on the loaded file (with --param overrides)'
     : 'betl binary not found — set $BETL_BIN or pass --betl';
   cb.disabled = !state.tools.dtsx2yaml;
   cb.title = state.tools.dtsx2yaml
@@ -2499,6 +2539,99 @@ async function runValidate() {
     return;
   }
   showToolResult('betl validate ' + state.currentPath, j);
+}
+
+/* Pop a small form pre-populated with declared parameters, then POST
+ * /api/run with whatever the operator typed. Required params are marked
+ * with a red asterisk; defaults pre-fill the inputs. Each input's
+ * `type:` (string / int / date / bool / timestamp) picks the HTML widget. */
+function openRunDialog() {
+  if (!state.tools.betl)    { toast('betl binary not configured', true); return; }
+  if (!state.currentPath)   { toast('Load a YAML file first', true); return; }
+  if (state.dirty)          { toast('Save first — run executes the on-disk file', true); return; }
+
+  const params = (state.rawDoc && state.rawDoc.parameters && typeof state.rawDoc.parameters === 'object')
+    ? state.rawDoc.parameters : {};
+  const keys = Object.keys(params);
+
+  function widgetFor(name, spec) {
+    spec = spec && typeof spec === 'object' ? spec : {};
+    const ptype = String(spec.type || 'string').toLowerCase();
+    const def = spec.default == null ? '' : String(spec.default);
+    const req = spec.required ? ' required' : '';
+    const reqMark = spec.required ? ' <span style="color:#d33">*</span>' : '';
+    const doc = spec.doc ? `<div class="run-doc">${esc(String(spec.doc).trim())}</div>` : '';
+    let input;
+    if (ptype === 'bool') {
+      const checked = (def === 'true' || def === '1') ? ' checked' : '';
+      input = `<input type="checkbox" id="rp_${esc(name)}" data-pname="${esc(name)}" data-ptype="bool"${checked}>`;
+    } else if (ptype.startsWith('int')) {
+      input = `<input type="number" step="1" id="rp_${esc(name)}" data-pname="${esc(name)}" data-ptype="int" value="${esc(def)}"${req}>`;
+    } else if (ptype === 'date') {
+      input = `<input type="date" id="rp_${esc(name)}" data-pname="${esc(name)}" data-ptype="date" value="${esc(def)}"${req}>`;
+    } else {
+      input = `<input type="text" id="rp_${esc(name)}" data-pname="${esc(name)}" data-ptype="${esc(ptype)}" value="${esc(def)}"${req} spellcheck="false">`;
+    }
+    return `<div class="run-row">
+      <label for="rp_${esc(name)}">${esc(name)}${reqMark}
+        <span class="run-type">${esc(ptype)}</span>
+      </label>
+      ${input}
+      ${doc}
+    </div>`;
+  }
+
+  const rowsHtml = keys.length
+    ? keys.map((k) => widgetFor(k, params[k])).join('')
+    : `<div style="color:var(--muted); font-family:var(--mono); font-size:12px;">
+         (no parameters declared — running with no overrides)
+       </div>`;
+
+  const body = `<form id="runForm" class="run-form">${rowsHtml}</form>`;
+  const foot = `<button class="btn" onclick="closeModal()">Cancel</button>
+    <button class="btn primary" id="runGoBtn">Run</button>`;
+  openModal('Run ' + state.currentPath, body, foot);
+  document.getElementById('runGoBtn').addEventListener('click', submitRunDialog);
+
+  // Submit on Ctrl/Cmd+Enter from any field.
+  document.getElementById('runForm').addEventListener('keydown', (e) => {
+    if ((e.ctrlKey || e.metaKey) && e.key === 'Enter') {
+      e.preventDefault();
+      submitRunDialog();
+    }
+  });
+}
+
+async function submitRunDialog() {
+  const inputs = document.querySelectorAll('#runForm [data-pname]');
+  const collected = {};
+  for (const inp of inputs) {
+    const name = inp.dataset.pname;
+    const ptype = inp.dataset.ptype;
+    if (ptype === 'bool') {
+      collected[name] = inp.checked ? 'true' : 'false';
+    } else if (inp.value !== '') {
+      collected[name] = inp.value;
+    }
+  }
+  openModal('Running betl run…',
+            `<div style="color:var(--muted)">executing <code>${esc(state.currentPath)}</code>…<br>(up to 10 min)</div>`,
+            '');
+  let j;
+  try {
+    const r = await fetch('/api/run', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ path: state.currentPath, params: collected }),
+    });
+    j = await r.json();
+    if (!r.ok) throw new Error(j.detail || ('HTTP ' + r.status));
+  } catch (e) {
+    closeModal();
+    toast('Run failed: ' + e.message, true);
+    return;
+  }
+  showToolResult('betl run ' + state.currentPath, j);
 }
 
 function openConvertBrowser() {

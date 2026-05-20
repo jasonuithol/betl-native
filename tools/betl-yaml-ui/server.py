@@ -197,6 +197,36 @@ async def validate(request: Request):
     return res
 
 
+@app.post("/api/run")
+async def run_pipeline(request: Request):
+    """Run `betl run <path>` with optional --param k=v overrides.
+
+    Body: {"path": "<rel>", "params": {"name": "value", ...}}.
+    Returns the same shape as /api/validate (rc + stdout + stderr + cmd).
+    Timeout is generous (600s) since pipelines can be long-running."""
+    body = json.loads((await request.body()).decode("utf-8") or "{}")
+    rel = body.get("path") or ""
+    p = safe(rel)
+    if not p.is_file():
+        raise HTTPException(404, "file not found")
+    betl = discover_betl(ROOT)
+    if not betl:
+        raise HTTPException(503, "betl binary not found — set BETL_BIN or pass --betl")
+    params = body.get("params") or {}
+    if not isinstance(params, dict):
+        raise HTTPException(400, "`params` must be a JSON object")
+    cmd = [betl, "run", str(p)]
+    for k, v in params.items():
+        if not isinstance(k, str) or not k:
+            raise HTTPException(400, "param keys must be non-empty strings")
+        # `betl run` takes one --param per key=value pair. Leave non-string
+        # values to str()-coerce — int / bool / etc. all round-trip.
+        cmd.extend(["--param", f"{k}={'' if v is None else v}"])
+    deps_lib = (ROOT / "deps/lib").as_posix()
+    env_extra = {"LD_LIBRARY_PATH": deps_lib + ":" + os.environ.get("LD_LIBRARY_PATH", "")}
+    return _run(cmd, env_extra=env_extra, timeout=600)
+
+
 @app.post("/api/convert")
 async def convert(request: Request):
     body = json.loads((await request.body()).decode("utf-8") or "{}")

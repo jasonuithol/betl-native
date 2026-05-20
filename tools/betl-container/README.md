@@ -34,6 +34,27 @@ tools/betl-container/betl --version
 The wrapper bind-mounts `$PWD` at `/workspace`, so paths passed to
 betl are interpreted relative to wherever you ran the wrapper from.
 
+### What `betl ui` does
+
+The yaml-ui is a browser-based viewer + editor for `betl.yml` files
+served on `http://127.0.0.1:8765`. Toolbar buttons:
+
+- **browse…** — file picker rooted at `/workspace` (the bind-mounted CWD)
+- **new** — empty `betl.yml` skeleton
+- **save** — write the current buffer back to disk (Ctrl+S)
+- **validate** — runs `betl validate` on the on-disk file
+- **run…** — pops a parameter form pre-populated from the file's
+  `parameters:` section (one widget per declared type), then runs
+  `betl run` with the collected `--param` overrides
+- **convert dtsx…** — file picker for `.dtsx`; runs dtsx2yaml and opens
+  the resulting `.betl.yml`
+
+The inspector (click any stage card / connection chip / parameter
+chip) edits a single node's fields, including a **Test connection**
+button on connection nodes that synthesizes a one-shot `SELECT 1`
+pipeline against the chosen DSN. SQL fields get a CodeMirror overlay
+on demand; DSN-style fields get a `key=value` pair editor.
+
 ### Environment overrides
 
 - `BETL_IMAGE` — tag to run (default: `betl:dev`).
