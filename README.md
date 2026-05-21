@@ -4,6 +4,10 @@ A cross-platform, open-source, text-first ETL system. Pipelines are
 plain YAML you can diff, review, and merge — no GUID-stamped XML, no
 binary blobs, no IDE lock-in.
 
+**[▶ Try the live yaml-ui demo](https://jasonuithol.github.io/betl/)** — the
+full-coverage integration pipeline pre-loaded in the browser-based
+viewer/editor; no install required.
+
 > **Status:** v0.2 landed 2026-05-12; SSIS-parity shipment (audit,
 > postgres.copy, mssql.bulkinsert, postgres.exec, mssql.exec, xlsx.read,
 > xlsx.write, xml.read) followed 2026-05-15. The pipeline file format,
