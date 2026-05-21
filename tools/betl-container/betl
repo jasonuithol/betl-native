@@ -56,6 +56,18 @@ if [[ -n "${BETL_DEV:-}" ]]; then
            -e BETL_DEV=1)
 fi
 
+# Forward every BETL_* env var from the host shell into the container
+# so pipelines referencing ${env.BETL_TEST_PG_DSN} etc. resolve.
+# `-e NAME` (no value) tells podman/docker to pass the current host
+# value, or skip it if unset — exactly the semantics we want.
+while IFS= read -r var; do
+    [[ -z "$var" ]] && continue
+    case "$var" in
+        BETL_IMAGE|BETL_RUNTIME|BETL_UI_PORT|BETL_DEV) continue ;;
+    esac
+    opts+=(-e "$var")
+done < <(compgen -e | grep '^BETL_' || true)
+
 # `betl ui` needs a TTY-less port forward. Everything else gets an
 # interactive TTY iff stdin is one (so `betl validate` works in a
 # pipeline + still gives a usable prompt when run manually).

@@ -146,18 +146,21 @@ async def log_event(request: Request):
     return {"ok": True}
 
 
-def _run(cmd: list[str], env_extra: dict | None = None, timeout: int = 120) -> dict:
+def _run(cmd: list[str], env_extra: dict | None = None, timeout: int = 120,
+         cwd: str | None = None) -> dict:
     """Execute `cmd`, capture stdout/stderr, never raise on non-zero rc."""
     env = os.environ.copy()
     if env_extra:
         env.update(env_extra)
     try:
-        cp = subprocess.run(cmd, env=env, capture_output=True, text=True, timeout=timeout)
+        cp = subprocess.run(cmd, env=env, cwd=cwd,
+                            capture_output=True, text=True, timeout=timeout)
         return {
             "rc": cp.returncode,
             "stdout": cp.stdout,
             "stderr": cp.stderr,
             "cmd": cmd,
+            "cwd": cwd,
         }
     except subprocess.TimeoutExpired as e:
         return {
@@ -165,9 +168,10 @@ def _run(cmd: list[str], env_extra: dict | None = None, timeout: int = 120) -> d
             "stdout": (e.stdout or "").decode() if isinstance(e.stdout, bytes) else (e.stdout or ""),
             "stderr": f"timed out after {timeout}s",
             "cmd": cmd,
+            "cwd": cwd,
         }
     except FileNotFoundError as e:
-        return {"rc": -2, "stdout": "", "stderr": str(e), "cmd": cmd}
+        return {"rc": -2, "stdout": "", "stderr": str(e), "cmd": cmd, "cwd": cwd}
 
 
 @app.get("/api/tools")
@@ -193,7 +197,7 @@ async def validate(request: Request):
     # Some local betl builds need deps/lib/ on LD_LIBRARY_PATH for libyaml.
     deps_lib = (ROOT / "deps/lib").as_posix()
     env_extra = {"LD_LIBRARY_PATH": deps_lib + ":" + os.environ.get("LD_LIBRARY_PATH", "")}
-    res = _run([betl, "validate", str(p)], env_extra=env_extra)
+    res = _run([betl, "validate", str(p)], env_extra=env_extra, cwd=str(p.parent))
     return res
 
 
@@ -224,7 +228,10 @@ async def run_pipeline(request: Request):
         cmd.extend(["--param", f"{k}={'' if v is None else v}"])
     deps_lib = (ROOT / "deps/lib").as_posix()
     env_extra = {"LD_LIBRARY_PATH": deps_lib + ":" + os.environ.get("LD_LIBRARY_PATH", "")}
-    return _run(cmd, env_extra=env_extra, timeout=600)
+    # Spawn with cwd = YAML's parent dir so relative paths inside the
+    # pipeline (fixtures/, out/, tmp/, etc.) resolve the same way they
+    # do when you `cd <dir> && betl run pipeline.yml` from a shell.
+    return _run(cmd, env_extra=env_extra, timeout=600, cwd=str(p.parent))
 
 
 @app.post("/api/convert")
