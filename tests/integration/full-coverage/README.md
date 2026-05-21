@@ -61,14 +61,30 @@ sqlcmd ... -d betl_coverage -i schemas.mssql.sql
 
 ## Run it
 
-```sh
-export BETL_TEST_PG_DSN="host=localhost port=5432 user=postgres dbname=betl_coverage"
-export BETL_TEST_MSSQL_DSN="Driver={ODBC Driver 18 for SQL Server};Server=localhost,1433;Uid=sa;Pwd=...;Database=betl_coverage;TrustServerCertificate=yes"
+DSNs are inlined in the YAML against the local dev DBs (stock dev-sandbox
+credentials, `host.containers.internal` so the betl container can reach
+host-side postgres/mssql). No env-var setup needed.
 
+```sh
 cd tests/integration/full-coverage
 betl validate pipeline.betl.yml
 betl run     pipeline.betl.yml --param batch_label=local-001
 ```
+
+### Via the yaml-ui Run button
+
+```sh
+tools/betl-container/betl ui
+```
+
+Open <http://127.0.0.1:8765/>, browse to `tests/integration/full-coverage/pipeline.betl.yml`,
+click **run…**, fill in `batch_label` (the only required param), submit.
+The dialog shows engine stdout/stderr — look for `run ok` on the last
+line.
+
+If you're running the engine on the host (no container), edit the
+connection DSNs in the YAML to use `localhost` instead of
+`host.containers.internal`.
 
 The `http.get` / `http.post` / `smtp.send` / `dotnet.task` stages are
 gated behind `condition: ${params.enable_remote}` and skip by default —

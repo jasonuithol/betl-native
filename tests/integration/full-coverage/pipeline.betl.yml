@@ -81,16 +81,20 @@ parameters:
     doc: When true, runs the http.* + smtp.send stages.
 
 # -----------------------------------------------------------------------------
-# Connections — both supported types. DSNs come from env so this file
-# doesn't carry credentials.
+# Connections — both supported types. DSNs are inline against the local
+# dev DBs (sa / DevP@ssw0rd!42 is the stock dev-sandbox password; this
+# file isn't a production package, it's a UI rendering stress test).
+# `host.containers.internal` resolves to the host machine when the betl
+# container talks to host-side postgres / mssql; swap to `localhost` if
+# you're running the engine on the host directly.
 # -----------------------------------------------------------------------------
 connections:
   warehouse:
     type: postgres
-    dsn: ${env.BETL_TEST_PG_DSN}
+    dsn: "host=host.containers.internal port=5432 user=postgres dbname=betl_coverage"
   legacy:
     type: mssql
-    dsn: ${env.BETL_TEST_MSSQL_DSN}
+    dsn: "Driver={ODBC Driver 18 for SQL Server};Server=host.containers.internal,1433;Uid=sa;Pwd=DevP@ssw0rd!42;Database=betl_coverage;TrustServerCertificate=yes"
 
 # -----------------------------------------------------------------------------
 # Pipeline
