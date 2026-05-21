@@ -4,7 +4,9 @@ A cross-platform, open-source, text-first ETL system. Pipelines are
 plain YAML you can diff, review, and merge — no GUID-stamped XML, no
 binary blobs, no IDE lock-in.
 
-> **Status:** v0.2 landed 2026-05-12. The pipeline file format,
+> **Status:** v0.2 landed 2026-05-12; SSIS-parity shipment (audit,
+> postgres.copy, mssql.bulkinsert, postgres.exec, mssql.exec, xlsx.read,
+> xlsx.write, xml.read) followed 2026-05-15. The pipeline file format,
 > provider ABI (`include/betl/provider.h`), and expression-engine
 > sub-ABI are stable in shape but may gain fields before v1.0.
 >
@@ -144,11 +146,16 @@ Server.
 | SOURCE | `mssql.read` | ✓ | unixODBC + FreeTDS; int / varchar / float / DATE / DATETIME2 / DATETIMEOFFSET / TIME / DECIMAL / UNIQUEIDENTIFIER / VARBINARY; nulls supported |
 | SOURCE | `betl.gen_int64` / `betl.gen_strings` | ✓ | Test generators |
 | SOURCE | `json.read` | ✓ | NDJSON (default) or JSON array of objects; declared `columns:`; every column emitted as utf8 (downstream `map` + `ssisexpr` casts the rest) |
+| SOURCE | `xml.read` | ✓ | libxml2 + XPath; `record_xpath:` selects each row node, `columns:` map sub-XPath to column. Strings + ints + decimals + dates |
+| SOURCE | `xlsx.read` | ✓ | xlsxio; pick `sheet:` by name or index; first row supplies headers, subsequent rows project into declared `columns:` |
 | SINK | `csv.write` | ✓ | RFC 4180; renders all source types as ISO 8601 / canonical text (binary as lower-case hex) |
 | SINK | `postgres.upsert` | ✓ | INSERT…ON CONFLICT; 4 conflict modes; binds every source type incl. NUMERIC / TIMESTAMPTZ / uuid / TIME / BYTEA |
+| SINK | `postgres.copy` | ✓ | libpq `COPY ... FROM STDIN BINARY`; truncate-or-append; fastest postgres sink for plain inserts. Does not accept NUMERIC — use `postgres.upsert` if you have decimals |
 | SINK | `mssql.upsert` | ✓ | MERGE; 4 conflict modes; binds DATE / DATETIME2 / DATETIMEOFFSET / DECIMAL / UNIQUEIDENTIFIER / TIME via SQL_C_CHAR text; VARBINARY via SQL_C_BINARY |
+| SINK | `mssql.bulkinsert` | ✓ | `mode: array` (ODBC parameter-array INSERT) or `mode: bcp` (FreeTDS db-lib BCP API — needs `libsybdb`). Append-only; `batch_size:` tunable |
 | SINK | `betl.count_rows` | ✓ | Smoke / assertion sink |
 | SINK | `json.write` | ✓ | NDJSON or array form; column names become JSON keys; supports utf8 / int8/16/32/64 / float64 / bool. NaN/Inf emit as `null` |
+| SINK | `xlsx.write` | ✓ | libxlsxwriter; writes single sheet; columns: utf8 / int / float / bool. Date/decimal pass through as text |
 | TRANSFORM | `filter` | ✓ | Predicate via the expression engine |
 | TRANSFORM | `map` | ✓ | `add:` (append) and `select:` (project / rename) |
 | TRANSFORM | `aggregate` | ✓ | `group_by` + count / sum / min / max |
@@ -163,6 +170,9 @@ Server.
 | TRANSFORM | `postgres.lookup` | ✓ | Cached SELECT + linear probe; on_miss error/null/drop |
 | TRANSFORM | `mssql.lookup` | ✓ | Same model over ODBC |
 | TRANSFORM | `multicast` | ✓ | 1-in-N-out fan-out via refcounted shared batches (zero-copy) |
+| TRANSFORM | `audit` | ✓ | Pass-through that appends constant `columns:` (literal values or `${...}` substitutions) — run-id / batch label / load timestamp stamping |
+| TRANSFORM | `postgres.exec` | ✓ | Per-row SQL execute (parameterized) against a postgres connection; binds row columns to `$1..$N`. Optional `returning:` projects RETURNING / SELECT output back into the stream |
+| TRANSFORM | `mssql.exec` | ✓ | Same model over ODBC: per-row parameterized statement with optional result projection |
 | TRANSFORM | `lua.map` | ✓ | Per-row Lua script; mutate `row` and return (synchronous, 1:1) |
 | TRANSFORM | `lua.script` | ✓ | Stateful Lua: `on_row`/`on_eof` + `emit()`; SSIS async script component (1:N, N:1, windowed) |
 | TRANSFORM | `dotnet.script` | ✓ | Stateful C# / VB.NET async script component; NativeAOT compile-on-validate; same protocol as `lua.script` |
@@ -175,10 +185,16 @@ Server.
 | TASK | `http.get` | ✓ | libcurl-based; `url:` + `save_to:` (response body), optional `headers:` list and `timeout: <n>s/<n>m`. Non-2xx fails with status code + body preview |
 | TASK | `http.post` | ✓ | Same shape as `http.get`; `body:` literal or `body_file:` path; headers/timeout/save_to as above |
 | TASK | `smtp.send` | ✓ | libcurl SMTP; `url:` (smtp:// or smtps://), `from:`, `to:` (list), optional `cc:`, `subject:`, `body:` or `body_file:`, optional `username:`/`password:` for AUTH. Plain text only — no attachments / HTML / MIME multipart yet. SSIS Send Mail Task |
-| CONTROL | `foreach` | ✓ | Iterates `body:` (nested stages) once per element of `over:` (literal list of strings). Binds `${vars.<as>}` per iteration. SSIS Foreach Loop Container — From-Variable enumerator |
+| TASK | `var.set` | ✓ | Bind a pipeline variable in `literal:` mode (constant) or `sql:` mode (single-cell SELECT). Variables are then visible as `${vars.<name>}` to downstream stages |
+| CONTROL | `foreach (over:)` | ✓ | Iterates `body:` (nested stages) once per element of a literal list. Binds `${vars.<as>}` per iteration. SSIS Foreach Loop Container — From-Variable enumerator |
+| CONTROL | `foreach (over_glob:)` | ✓ | Same body, with the list generated by POSIX `glob(3)` against a path pattern. SSIS Foreach Loop Container — Files enumerator |
+| CONTROL | `foreach (over_query:)` | ✓ | List generated by a single-column SELECT against a declared `connection:`. SSIS Foreach Loop Container — ADO enumerator |
+| CONTROL | `after:` | ✓ | Per-stage list of sibling stage ids that must complete first. Topologically sorted within each `pipeline:` / `body:` scope; cycles rejected at validate time. SSIS Success precedence constraints |
 | CONTROL | `on_failure: continue` | ✓ | Per-stage attribute; a non-zero return is logged at WARN and the executor proceeds. SSIS Failure/Completion precedence constraints |
 | CONTROL | `condition: "<scalar>"` | ✓ | Per-stage attribute; after `${...}` substitution, truthy values run, falsy values skip with a WARN. v1 accepts true/false/yes/no/1/0; `{lang, expr}` form deferred |
 | TOOL | `betl-dtsx2yaml` | ✓ | DTSX → betl YAML converter; ships in `tools/`, runs separately from `betl run` |
+| TOOL | `betl-yaml-ui` | ✓ | Browser-based viewer + editor for `.betl.yml` files (FastAPI + dagre layout). Inspector with per-node forms, SQL CodeMirror overlay, Test-Connection / Validate / Run / Convert-dtsx toolbar buttons. See [`tools/betl-yaml-ui/`](tools/betl-yaml-ui/) |
+| TOOL | `betl-container` | ✓ | Single-image bundle (engine + providers + dtsx2yaml + yaml-ui) built against pinned Debian bookworm libs. `tools/betl-container/build.sh` + wrapper script for one-shot validate / run / convert / ui invocations |
 | ENGINE | `literal` | ✓ | Constant expressions (built-in) |
 | ENGINE | `lua` | ✓ | Lua 5.4 (provider plugin) |
 | ENGINE | `ssisexpr` | ✓ | SSIS Expression Language — typed `(DT_*)` casts (incl. NUMERIC / GUID / dates), 3VL nulls, ~30 functions, decimal+uuid comparisons (provider plugin); see [`docs/SSISEXPR.md`](docs/SSISEXPR.md) |
@@ -242,17 +258,30 @@ Prerequisites:
 
 - A C11 compiler (tested with gcc 13), CMake ≥ 3.20, ninja or make.
 - `libyaml` (always required), via `pkg-config`.
-- *Optional:* `libpq` (for `postgres.*` components),
-  `unixODBC` (for `mssql.*` components), `liblua5.4` (for the
-  `betl-lua` provider).
+- *Optional, each gating specific components:*
+  - `libpq` — `postgres.*`
+  - `unixODBC` — `mssql.*`
+  - `freetds` (libsybdb) — `mssql.bulkinsert mode: bcp`
+  - `libcurl` — `http.*` + `smtp.send`
+  - `libxml2` — `xml.read`
+  - `libxlsxwriter` — `xlsx.write`
+  - `xlsxio` (not in apt; build from upstream tarball or via the
+    container) — `xlsx.read`
+  - `liblua5.4` — `betl-lua` provider (Lua scripting + `lua-expr`)
 
-On Debian / Ubuntu:
+On Debian / Ubuntu, for the full feature set:
 
 ```sh
 sudo apt install build-essential cmake ninja-build pkg-config \
                  libyaml-dev libpq-dev liblua5.4-dev \
-                 unixodbc-dev libodbc2 tdsodbc libodbcinst2
+                 unixodbc-dev freetds-dev \
+                 libcurl4-openssl-dev libxml2-dev libicu-dev \
+                 libxlsxwriter-dev libzip-dev libexpat1-dev
 ```
+
+xlsxio (`xlsx.read`) isn't packaged on Debian — fetch and build from
+[brechtsanders/xlsxio](https://github.com/brechtsanders/xlsxio), or
+just use the container (see below).
 
 Build:
 
@@ -262,9 +291,27 @@ cmake --build build
 ctest --test-dir build --output-on-failure
 ```
 
-Each optional dependency is detected at configure time. If `libpq` is
-absent the build skips the postgres components; same for `unixODBC`
-and `lua5.4`.
+Each optional dependency is detected at configure time. Missing
+dependencies disable the corresponding components silently — check the
+configure-time log for `... component disabled` lines if something you
+expected isn't available.
+
+## Container image (all batteries included)
+
+The `tools/betl-container/` directory bundles the C engine, every
+provider, the .NET dtsx2yaml converter, and the yaml-ui into a single
+podman/docker image — useful when you don't want to chase a dozen apt
+packages, and the only way today to get `xlsx.read` without compiling
+xlsxio yourself.
+
+```sh
+tools/betl-container/build.sh                 # build betl:dev (~5 min)
+tools/betl-container/betl run pipeline.yml    # one-shot run
+tools/betl-container/betl ui                  # http://127.0.0.1:8765
+```
+
+See [`tools/betl-container/README.md`](tools/betl-container/README.md)
+for the full wrapper-script surface and env-var overrides.
 
 ## Project layout
 
@@ -280,6 +327,8 @@ providers/betl-ssisexpr/  SSIS Expression Language engine
 providers/betl-dotnet/    dotnet.task / dotnet.script / dotnet.pipelinecomponent
                           provider + Betl.Ssis.PipelineCompat shim
 tools/betl-dtsx2yaml/     DTSX → betl YAML converter (C# console app)
+tools/betl-yaml-ui/       Browser-based YAML viewer/editor (FastAPI + dagre)
+tools/betl-container/     Containerfile + wrapper scripts; bundled image
 tests/                    C tests; ctest harness; integration tests gated on
                           a sibling Postgres / MSSQL
 examples/                 Runnable pipelines with fixtures
@@ -290,6 +339,7 @@ docs/PIPELINECOMPONENT.md `dotnet.pipelinecomponent` API + porting guide
 SPEC.md                   Full betl.linux design (text-first, types, ABI, …)
 SPEC_CORE.md              Runtime-neutral contract; what conforming
                           implementations must honor
+Containerfile             Source for the bundled container image
 ```
 
 ## Learn more
