@@ -249,6 +249,7 @@ endif()
 # libxml2: used by xml.read (SSIS XML Source parity). Optional.
 find_path(LIBXML2_INCLUDE_DIR libxml/xpath.h
     HINTS ${CMAKE_SOURCE_DIR}/deps/include/libxml2
+    PATH_SUFFIXES libxml2
 )
 find_library(LIBXML2_LIBRARY NAMES xml2
     HINTS ${CMAKE_SOURCE_DIR}/deps/lib

@@ -29,9 +29,32 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
         libcurl4-openssl-dev \
         libxml2-dev \
         libicu-dev \
+        libxlsxwriter-dev \
+        libzip-dev \
+        libexpat1-dev \
         # provider deps
         liblua5.4-dev \
     && rm -rf /var/lib/apt/lists/*
+
+# xlsxio (not in Debian apt — build from upstream tarball). Provides
+# xlsx.read for SSIS Excel Source parity. Installed to /usr/local so the
+# betl cmake invocation below picks it up via the default search paths;
+# the resulting .so files are then copied into /opt/betl/lib in the
+# runtime stage so the engine can dlopen them.
+RUN curl -fsSL https://github.com/brechtsanders/xlsxio/archive/refs/tags/0.2.36.tar.gz \
+         -o /tmp/xlsxio.tar.gz \
+    && tar xzf /tmp/xlsxio.tar.gz -C /tmp \
+    && cmake -S /tmp/xlsxio-0.2.36 -B /tmp/xlsxio-build \
+         -DCMAKE_INSTALL_PREFIX=/usr/local \
+         -DBUILD_SHARED=ON \
+         -DBUILD_TOOLS=OFF \
+         -DBUILD_EXAMPLES=OFF \
+         -DBUILD_DOCUMENTATION=OFF \
+         -DWITH_LIBZIP=ON \
+    && cmake --build /tmp/xlsxio-build -j \
+    && cmake --install /tmp/xlsxio-build \
+    && ldconfig \
+    && rm -rf /tmp/xlsxio*
 
 # .NET 8 SDK for dtsx2yaml. Installed to /opt/dotnet so it doesn't
 # bleed into the runtime stage — we only need the published self-
@@ -83,6 +106,9 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
         libcurl4 \
         libxml2 \
         libicu72 \
+        libxlsxwriter4 \
+        libzip4 \
+        libexpat1 \
         # provider runtime deps
         liblua5.4-0 \
         # libldap is pulled in transitively by libpq / freetds — pin to
@@ -114,6 +140,13 @@ RUN install -d -m 0755 /etc/apt/keyrings \
     && rm -rf /var/lib/apt/lists/*
 
 COPY --from=build /opt/betl /opt/betl
+
+# xlsxio shared libs (built from source in the build stage; not in
+# Debian apt). The engine was linked against these at /usr/local/lib —
+# carry them into /opt/betl/lib so LD_LIBRARY_PATH (already set to
+# /opt/betl/lib below) resolves them at runtime.
+COPY --from=build /usr/local/lib/libxlsxio_read.so* /opt/betl/lib/
+COPY --from=build /usr/local/lib/libxlsxio_write.so* /opt/betl/lib/
 
 # Pip venv for the UI so we sidestep PEP 668 + don't pollute system Python.
 RUN python3 -m venv /opt/betl/venv \
