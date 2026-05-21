@@ -9,15 +9,17 @@ shared libraries so it's reproducible across hosts.
 From the repo root:
 
 ```sh
-podman build -t betl:dev -f Containerfile .
+tools/betl-container/build.sh
 ```
 
-(`docker build …` works the same; the wrapper script auto-detects
-either runtime.)
+This wraps `podman build -t betl:dev -f Containerfile .` (or `docker
+build …` — the script auto-detects). Extra flags are forwarded, e.g.
+`tools/betl-container/build.sh --no-cache`. Override the tag or
+runtime with `BETL_IMAGE=` / `BETL_RUNTIME=`.
 
-The first build downloads the .NET 8 SDK and apt packages — expect
-3–5 minutes and ~1.5 GB of disk for the build layer. The runtime
-image is ~600 MB.
+The first build downloads the .NET 8 SDK, apt packages, and builds
+xlsxio from upstream — expect 5–8 minutes and ~1.5 GB of disk for the
+build layer. The runtime image is ~700 MB.
 
 ## Run
 
@@ -30,6 +32,9 @@ tools/betl-container/betl convert path/to/package.dtsx
 tools/betl-container/betl ui      # http://127.0.0.1:8765
 tools/betl-container/betl --version
 ```
+
+`tools/betl-container/run-container.sh` is a thin alias that defaults
+to `ui` when called with no args — handy as a `Start` button target.
 
 The wrapper bind-mounts `$PWD` at `/workspace`, so paths passed to
 betl are interpreted relative to wherever you ran the wrapper from.
@@ -67,6 +72,11 @@ on demand; DSN-style fields get a `key=value` pair editor.
   ```
   BETL_DEV=1 tools/betl-container/run-container.sh
   ```
+- Any other `BETL_*` env var is forwarded into the container. Pipelines
+  that reference `${env.BETL_TEST_PG_DSN}` etc. resolve as long as you
+  set the variable in the shell that launches the wrapper. (The four
+  wrapper-internal vars above are excluded so they don't leak into the
+  engine's environment.)
 
 ### Without the wrapper
 
