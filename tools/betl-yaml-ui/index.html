@@ -1012,6 +1012,93 @@
 'use strict';
 
 /* -------------------------------------------------------------------------
+ * Demo-mode shim
+ *
+ * The UI's normal mode talks to a FastAPI backend (server.py) that shells
+ * out to the betl engine. For a GitHub-Pages portfolio we want the same
+ * HTML running statically with no backend at all — viewer, inspector,
+ * SQL editor and run-form all functional, just the bits that need a
+ * subprocess (Validate / Run / Test-Connection / Convert dtsx / Save)
+ * stubbed with canned responses.
+ *
+ * Triggers (any of these flip DEMO_MODE on):
+ *   - hostname ends in .github.io
+ *   - URL has ?demo=1
+ *   - page loaded over file:// (so a downloaded copy still works)
+ *
+ * The companion file `demo-pipeline.betl.yml` is fetched on first load
+ * and served back from the stubbed /api/file endpoint. The GH-Action
+ * that publishes the site copies tests/integration/full-coverage/
+ * pipeline.betl.yml into place under that name.
+ * ----------------------------------------------------------------------- */
+const DEMO_MODE = (() => {
+  const u = new URL(window.location.href);
+  if (u.searchParams.get('demo') === '1') return true;
+  if (u.hostname.endsWith('.github.io')) return true;
+  if (u.protocol === 'file:') return true;
+  return false;
+})();
+const DEMO_FILE = 'demo-pipeline.betl.yml';
+
+if (DEMO_MODE) {
+  const jsonResp = (obj, status = 200) => new Response(JSON.stringify(obj),
+    { status, headers: { 'Content-Type': 'application/json' } });
+  const textResp = (text, status = 200) => new Response(text,
+    { status, headers: { 'Content-Type': 'text/plain' } });
+
+  let _demoYamlPromise = null;
+  const loadDemoYaml = () => {
+    if (!_demoYamlPromise) _demoYamlPromise = fetch(DEMO_FILE).then(r => r.text());
+    return _demoYamlPromise;
+  };
+
+  const realFetch = window.fetch.bind(window);
+  window.fetch = async (input, init) => {
+    const url = typeof input === 'string' ? input : input.url;
+    const u = new URL(url, window.location.href);
+    if (!u.pathname.startsWith('/api/')) return realFetch(input, init);
+    const method = ((init && init.method) || 'GET').toUpperCase();
+    switch (u.pathname) {
+      case '/api/list':
+        return jsonResp({
+          root: '/demo', path: u.searchParams.get('path') || '',
+          dirs: [], files: [{ name: DEMO_FILE, path: DEMO_FILE, size: 0 }],
+        });
+      case '/api/file':
+        if (method === 'GET') return textResp(await loadDemoYaml());
+        return jsonResp({ detail: 'demo mode is read-only' }, 403);
+      case '/api/tools':
+        // Pretend tools exist so the toolbar buttons render enabled —
+        // the stubs below produce demo-friendly responses on click.
+        return jsonResp({ betl: '(demo)', dtsx2yaml: '(demo)' });
+      case '/api/validate':
+        return jsonResp({ rc: 0,
+          stdout: DEMO_FILE + ': OK (demo mode — validation stubbed; no engine running)\n',
+          stderr: '', cmd: ['(demo)', 'validate', DEMO_FILE] });
+      case '/api/run':
+        return jsonResp({ rc: 0,
+          stdout: '[demo mode] this is a static portfolio page — there is no engine '
+                + 'attached to actually run the pipeline.\n\nWhen the full betl '
+                + 'container is running, this button would spawn `betl run` against '
+                + 'the loaded file and stream stdout/stderr back here.\n',
+          stderr: '', cmd: ['(demo)', 'run', DEMO_FILE] });
+      case '/api/test-connection':
+        return jsonResp({ rc: 0,
+          stdout: '[demo mode] connection test stubbed — no live DB attached.\n',
+          stderr: '', cmd: ['(demo)', 'test-connection'] });
+      case '/api/convert':
+        return jsonResp({ rc: 1,
+          stdout: '', stderr: '[demo mode] dtsx2yaml not available without a backend.\n',
+          cmd: ['(demo)', 'convert'] });
+      case '/api/log':
+        return jsonResp({ ok: true });
+      default:
+        return jsonResp({ detail: 'unknown endpoint in demo mode' }, 404);
+    }
+  };
+}
+
+/* -------------------------------------------------------------------------
  * Data model
  *
  * Pipeline = { name: string, steps: Step[] }
@@ -2723,6 +2810,23 @@ function showToolResult(title, j) {
 }
 
 fetchToolsInfo();
+
+/* Demo mode: auto-load the bundled pipeline and show a banner so it's
+ * obvious you're looking at a static portfolio page rather than a live
+ * editor pointed at a real filesystem. */
+if (DEMO_MODE) {
+  // Toolbar-anchored banner; the path crumb tells the rest of the
+  // story (it'll read "@ demo-pipeline.betl.yml" after the load).
+  const bar = document.createElement('div');
+  bar.style.cssText = 'background:#fff7d6;border-bottom:1px solid #e0c97a;'
+    + 'padding:6px 14px;font:13px var(--mono);color:#7a5a00;text-align:center;';
+  bar.innerHTML = 'demo mode &mdash; static portfolio page; Validate / Run / '
+    + 'Test-Connection are stubbed. Source: '
+    + '<a href="https://github.com/jasonuithol/betl" style="color:inherit;">'
+    + 'github.com/jasonuithol/betl</a>';
+  document.body.insertBefore(bar, document.body.firstChild);
+  loadServerFile(DEMO_FILE);
+}
 
 /* orientation toggle */
 document.getElementById('orientToggle').addEventListener('click', (e) => {

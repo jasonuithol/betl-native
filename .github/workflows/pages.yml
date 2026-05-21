@@ -1,0 +1,58 @@
+# Publishes the yaml-ui as a static GitHub Pages site with the
+# full-coverage integration pipeline pre-loaded. The HTML detects the
+# *.github.io hostname and short-circuits every /api/* call to canned
+# responses (see DEMO_MODE shim in index.html), so the viewer + inspector
+# + SQL editor + run-form all work end-to-end with no backend attached.
+#
+# Trigger: any push that touches the UI or the demo pipeline, plus a
+# manual "Run workflow" button. First publish needs Pages enabled in
+# the repo Settings -> Pages -> Source = "GitHub Actions".
+
+name: Deploy demo to GitHub Pages
+
+on:
+  push:
+    branches: [master]
+    paths:
+      - 'tools/betl-yaml-ui/**'
+      - 'tests/integration/full-coverage/pipeline.betl.yml'
+      - '.github/workflows/pages.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  pages: write
+  id-token: write
+
+concurrency:
+  group: pages
+  cancel-in-progress: false
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Assemble demo bundle
+        run: |
+          mkdir -p _site
+          cp tools/betl-yaml-ui/index.html _site/index.html
+          cp tests/integration/full-coverage/pipeline.betl.yml \
+             _site/demo-pipeline.betl.yml
+          # Skip Jekyll processing — we're shipping the HTML as-is.
+          touch _site/.nojekyll
+
+      - uses: actions/upload-pages-artifact@v3
+        with:
+          path: _site
+
+  deploy:
+    needs: build
+    runs-on: ubuntu-latest
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      - id: deployment
+        uses: actions/deploy-pages@v4
