@@ -4,7 +4,7 @@ A cross-platform, open-source, text-first ETL system. Pipelines are
 plain YAML you can diff, review, and merge — no GUID-stamped XML, no
 binary blobs, no IDE lock-in.
 
-**[▶ Try the live yaml-ui demo](https://jasonuithol.github.io/betl/)** — the
+**[▶ Try the live yaml-ui demo](https://jasonuithol.github.io/betl-tools/)** — the
 full-coverage integration pipeline pre-loaded in the browser-based
 viewer/editor; no install required.
 
